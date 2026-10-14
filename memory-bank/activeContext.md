@@ -8,7 +8,7 @@ _Last updated: 2026-10-14_
 
 - Voice barge-in robust to background sounds is merged into `main` and was tried live: false alarms pause and resume, and a server-cut answer is finished by the model without an audible seam.
 - Screenshots come from the monitor under the cursor (fallback: primary) instead of whatever `mss` lists first; verified live on a 3-monitor setup and merged into `main`.
-- Next: `computer_settings` → `close_app` ignores the app name and sends Alt+F4 to whatever window is focused (see `progress.md` → Known issues).
+- `close_app` closes the named app and verifies it, instead of pressing Alt+F4 in the focused window; merged into `main`. Verified live: test windows (plain close; save prompt reported), Outlook closed by name (process `olk.exe`, matched by title), Task Manager answered with the administrator-rights reason. Replies use the name the user said, not the process name.
 
 ## Recent decisions
 
@@ -21,6 +21,6 @@ _Last updated: 2026-10-14_
 
 ## Next steps
 
-- Fix `close_app`: close by name, verify, report missing rights.
+- Monitor choice for `screen_process` — deferred; the plan is in `progress.md` → Fork backlog.
 - Try interrupt-by-name live, and each wake engine on a real microphone (a Ukrainian name on Vosk and on sherpa).
 - Pick the next feature from the upstream "LVI+" roadmap (see `progress.md`).
