@@ -85,16 +85,74 @@ def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]
         return img_bytes, f"image/{source_format.lower()}"
 
 
+def _cursor_pos() -> tuple[int, int] | None:
+    """Mouse position in the same coordinates mss uses, or None.
+
+    Must be called after mss is created: on Windows mss makes the process
+    per-monitor DPI aware, and only then does GetCursorPos report physical
+    pixels like the monitor rectangles do (Qt does the same for the app)."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            pt = wintypes.POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                return int(pt.x), int(pt.y)
+            return None
+        import pyautogui
+        x, y = pyautogui.position()
+        return int(x), int(y)
+    except Exception:
+        return None
+
+
+def _pick_monitor(monitors: list[dict],
+                  cursor: tuple[int, int] | None) -> tuple[int, str]:
+    """Which screen "my screen" means: (index into `monitors`, why).
+
+    mss lists [0] = every screen combined, [1..n] = the real ones, in the
+    order the OS enumerates them — NOT primary first. Taking [1] meant one
+    real setup sent the model a 1280×720 AV-receiver output while the user
+    worked on a 3440×1440 primary, and every "what is on my screen" was
+    answered about the wrong screen.
+
+    The screen under the mouse is where the user is working; the primary
+    screen is the fallback when the cursor cannot be read.
+    """
+    if len(monitors) <= 1:
+        return 0, "only screen"
+    real = list(enumerate(monitors))[1:]
+    if cursor is not None:
+        x, y = cursor
+        for i, m in real:
+            if (m["left"] <= x < m["left"] + m["width"]
+                    and m["top"] <= y < m["top"] + m["height"]):
+                return i, "under the cursor"
+    for i, m in real:
+        if m.get("is_primary"):
+            return i, "primary"
+    # Older mss has no is_primary; the primary display sits at the origin on
+    # Windows and macOS.
+    for i, m in real:
+        if m["left"] == 0 and m["top"] == 0:
+            return i, "primary"
+    return 1, "first listed"
+
+
 def _capture_screen() -> tuple[bytes, str]:
 
     if not _MSS:
         raise RuntimeError("mss is not installed. Run: pip install mss")
 
-    with mss.mss() as sct:
+    factory = getattr(mss, "MSS", None) or mss.mss   # mss.mss is deprecated in 10.x
+    with factory() as sct:
         monitors = sct.monitors          # [0] = all combined, [1..n] = real screens
-        target   = monitors[1] if len(monitors) > 1 else monitors[0]
+        idx, why = _pick_monitor(monitors, _cursor_pos())
+        target   = monitors[idx]
         shot     = sct.grab(target)
         png      = mss.tools.to_png(shot.rgb, shot.size)
+    print(f"[Vision] 🖥️  Monitor {idx} of {len(monitors) - 1}: "
+          f"{target['width']}×{target['height']} ({why})")
 
     return _compress(png, "PNG")
 

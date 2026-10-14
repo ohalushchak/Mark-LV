@@ -7,7 +7,8 @@ _Last updated: 2026-10-14_
 ## Current focus
 
 - Voice barge-in robust to background sounds is merged into `main` and was tried live: false alarms pause and resume, and a server-cut answer is finished by the model without an audible seam.
-- Next: screen capture picks the wrong monitor on multi-display setups (see `progress.md` → Known issues).
+- Screenshots come from the monitor under the cursor (fallback: primary) instead of whatever `mss` lists first; verified live on a 3-monitor setup and merged into `main`.
+- Next: `computer_settings` → `close_app` ignores the app name and sends Alt+F4 to whatever window is focused (see `progress.md` → Known issues).
 
 ## Recent decisions
 
@@ -20,6 +21,6 @@ _Last updated: 2026-10-14_
 
 ## Next steps
 
-- Fix the multi-monitor screen capture.
+- Fix `close_app`: close by name, verify, report missing rights.
 - Try interrupt-by-name live, and each wake engine on a real microphone (a Ukrainian name on Vosk and on sherpa).
 - Pick the next feature from the upstream "LVI+" roadmap (see `progress.md`).
