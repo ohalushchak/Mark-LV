@@ -34,7 +34,7 @@ It's not just an assistant — it's an extension of your digital life.
 | 🎚️ Push-to-Talk | Hold **Ctrl+Space** and the mic opens — closed the rest of the time. Truly global on Windows, window-scoped elsewhere |
 | 🔇 Self-Echo Guard | Never answers its own last sentence: the tail of its own voice is recognised and dropped without muting you |
 | 🪪 Runtime Self-Knowledge | Name, OS, abilities **and limits** are generated from the live system each session — rename it or add a plugin and it knows |
-| 🎙️ Wake Word | Local **"Hey Jarvis"** detection — sleeps until called, auto-sleeps after 2 min of silence, and never streams audio while asleep |
+| 🎙️ Wake Word | Local detection of **"Hey Jarvis"** or **any name you type** (Ukrainian included) — sleeps until called, hears the command said in the same breath, "go to sleep" by voice, and never streams audio while asleep |
 | ⚡ Instant Acknowledgment | Speaks a short, context-aware reply in **your language** the instant a longer task starts — no more silent waiting |
 | 🚀 Faster Live Engine | Runs on **Gemini 3.1 Flash Live** — roughly 2× faster time-to-first-word than the previous model |
 | 🧩 Self-Describing Skills | Every bundled skill declares its own `TOOL` dict + handler and is auto-discovered at launch — adding one is a single file |
@@ -100,7 +100,7 @@ So there are two players running together, with a timer that corrects any drift 
 The microphone is open while a video plays, so the moment you turn the sound on, JARVIS starts answering the film. The mic now mutes itself when the video's sound goes on and unmutes when it goes off — and it says so in the activity log rather than going deaf silently.
 
 #### 🎛 Two drawers instead of one
-⚙ **SETUP** holds the things you set once — remote control, desktop shortcut, auto-start and customisation. 🎛 **CONTROLS** holds the switches you flick daily — fullscreen, morning brief, wake word, sleep, push-to-talk, HUD style. Only one is open at a time, and each sits under its own header button.
+⚙ **SETUP** holds the things you set once — remote control, desktop shortcut, auto-start, customisation and wake-word setup. 🎛 **CONTROLS** holds the switches you flick daily — fullscreen, morning brief, wake word, sleep, push-to-talk, HUD style. Only one is open at a time, and each sits under its own header button.
 
 The panel used to stutter when it opened, and the obvious explanation — too many buttons — was wrong. Measured, the **first** wake-word state check took **2.104 seconds**, because it imported `openwakeword` on the UI thread the moment the drawer was built. That import now happens off-thread at boot, and the drawer opens instantly whether it has six buttons or sixteen.
 
@@ -282,7 +282,7 @@ python main.py
 
 `setup.py` only ever installs what your operating system needs — the Windows-only libraries are skipped automatically on macOS and Linux, and vice-versa. It also checks your Python version up front, so a wrong interpreter fails with a sentence instead of a wall of pip output. Prefer to do it by hand? `pip install -r requirements.txt` works too.
 
-> ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError` for an OS-specific package, install it with `pip install <module_name>`. The optional **wake word** engine is *not* installed here — grab it in one click from **⚙ → WAKE WORD** inside the app.
+> ⚠️ **Installation Note:** If you hit a `ModuleNotFoundError` for an OS-specific package, install it with `pip install <module_name>`. The optional **wake word** engines are *not* installed here — grab the one you pick in one click from **⚙ → WAKE WORD SETUP** inside the app.
 
 ---
 
@@ -292,12 +292,12 @@ python main.py
 | --- | --- |
 | **OS** | Windows 10/11, macOS, or Linux |
 | **Python** | 3.11, 3.12 or 3.13 |
-| **Microphone** | Required for voice interaction (and for the "Hey Jarvis" wake word) |
+| **Microphone** | Required for voice interaction (and for the wake word) |
 | **Speakers** | Required for voice replies |
 | **API Key** | Free Gemini API key (entered on first launch → `config/api_keys.json`) |
 | **GPU** | **Not required.** The avatar is rendered in software, and so is HUD video |
 | **YouTube on the HUD** | `yt-dlp`, installed by `setup.py`. Without it, local files and direct URLs still play and YouTube links open in the browser with an explanation |
-| **Wake word** *(optional)* | One-click download from ⚙ → WAKE WORD (`openwakeword`, a few MB, fully local) |
+| **Wake word** *(optional)* | One-click download from ⚙ → WAKE WORD SETUP, fully local: `openwakeword` (a few MB, "Hey Jarvis" or a trained model), `sherpa-onnx` (~20 MB, any typed phrase) or `vosk` (40–80 MB, native Ukrainian/English words) |
 
 ---
 
@@ -348,10 +348,12 @@ Mark LV/
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
-│   └── wake_word.py          # Local "Hey Jarvis" detector — own thread, offline, opt-in
+│   ├── wake_word.py          # Wake-word detector — own thread, offline, opt-in, engine-agnostic
+│   └── wake_engines/         # openWakeWord / sherpa-onnx / Vosk behind one interface, plus model download
 └── config/
     ├── api_keys.json         # API key, name, voice, colour, toggles — created on first launch (git-ignored)
-    └── certs/                # Self-signed TLS pair for the phone dashboard — generated locally (git-ignored)
+    ├── certs/                # Self-signed TLS pair for the phone dashboard — generated locally (git-ignored)
+    └── wake_models/          # Wake-word models downloaded from the settings panel (git-ignored)
 ```
 
 ---

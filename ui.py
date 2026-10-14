@@ -50,8 +50,9 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSlider,
+    QSpinBox, QSplitter,
     QGraphicsScene, QGraphicsView,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
@@ -2173,6 +2174,326 @@ class AudioDeviceOverlay(_HudOverlay):
             self.picked.emit()
 
 
+class WakeWordOverlay(_HudOverlay):
+    """How the assistant hears its name: which engine listens, for what
+    phrase, and how long it stays awake afterwards.
+
+    The engines differ in what they can be asked to listen for, so the panel
+    only shows the fields the chosen one uses — a model file for openWakeWord,
+    a typed phrase for Sherpa and Vosk, a language for Vosk."""
+
+    applied = pyqtSignal()          # emitted after Apply
+    _status_sig = pyqtSignal()      # an install finished on a worker thread
+    _OW = 480
+
+    _OWW_CHOICES = [("Hey Jarvis", "hey_jarvis"), ("Alexa", "alexa"),
+                    ("Hey Mycroft", "hey_mycroft"), ("Hey Rhasspy", "hey_rhasspy"),
+                    ("Custom model file (.onnx)…", "")]
+    _HINTS = {
+        "openwakeword": "Lowest CPU and the fewest false wakes. A new phrase needs a "
+                        "model trained with openWakeWord's notebook — pick its .onnx file.",
+        "sherpa":       "Type any phrase — no training. The model hears English sounds, "
+                        "so a Ukrainian name is spelled the way it sounds (Марко → MARKO). "
+                        "Two words wake it more reliably than one.",
+        "vosk":         "Understands Ukrainian words natively. Uses more CPU and decides at "
+                        "the end of what you said. The phrase must be a word the model knows.",
+    }
+
+    def __init__(self, log=None, parent=None):
+        super().__init__(parent)
+        from core.wake_engines import engine_class
+        from memory.config_manager import (
+            WAKE_ENGINES, get_assistant_name, get_wake_settings,
+        )
+        self._log = log or (lambda _m: None)
+        self._name = get_assistant_name()
+        cfg = get_wake_settings()
+
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            WakeWordOverlay {{
+                background: rgba(0, 6, 10, 245);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+            QCheckBox {{ color: {C.TEXT}; background: transparent; }}
+            QCheckBox::indicator {{ width: 11px; height: 11px;
+                border: 1px solid {C.BORDER_B}; background: #000d12; }}
+            QCheckBox::indicator:checked {{ background: {C.PRI_DIM}; }}
+            QSpinBox {{ background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 4px; }}
+        """)
+        self.setFixedWidth(self._OW)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(5)
+
+        hdr = QLabel("🎙  WAKE WORD")
+        hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        lay.addWidget(hdr)
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        lay.addWidget(sep)
+
+        _field_css = (
+            f"background: #000d12; color: {C.TEXT}; border: 1px solid {C.BORDER}; "
+            f"border-radius: 3px; padding: 4px 8px;")
+        _combo_css = (
+            f"QComboBox {{ {_field_css} }}"
+            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
+            f"QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT}; "
+            f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER}; }}")
+
+        def _cap(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setFont(QFont("Courier New", 8))
+            lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            lay.addWidget(lbl)
+            return lbl
+
+        def _combo(items, current) -> QComboBox:
+            box = QComboBox()
+            box.setFont(QFont("Courier New", 9))
+            box.setFixedHeight(28)
+            box.setStyleSheet(_combo_css)
+            for text, data in items:
+                box.addItem(text, data)
+            idx = box.findData(current)
+            box.setCurrentIndex(idx if idx >= 0 else 0)
+            lay.addWidget(box)
+            return box
+
+        def _edit(text: str) -> QLineEdit:
+            e = QLineEdit(text)
+            e.setFont(QFont("Courier New", 9))
+            e.setFixedHeight(28)
+            e.setStyleSheet(f"QLineEdit {{ {_field_css} }}")
+            lay.addWidget(e)
+            return e
+
+        _cap("ENGINE — what listens for the wake phrase")
+        self._engine = _combo([(engine_class(e).title, e) for e in WAKE_ENGINES],
+                              cfg["engine"])
+
+        self._oww_cap = _cap("PHRASE — pretrained model, or your own")
+        oww = cfg["oww_model"]
+        pre = {d for _t, d in self._OWW_CHOICES if d}
+        self._oww = _combo(self._OWW_CHOICES, oww if oww in pre else "")
+        self._oww_path = _edit("" if oww in pre else oww)
+        self._oww_path.setPlaceholderText("path to a .onnx model")
+        self._oww_browse = QPushButton("BROWSE…")
+        self._oww_browse.setFixedHeight(24)
+        self._oww_browse.setFont(QFont("Courier New", 8))
+        self._oww_browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._oww_browse.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {C.TEXT_MED}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; }}"
+            f"QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}")
+        self._oww_browse.clicked.connect(self._browse_model)
+        lay.addWidget(self._oww_browse)
+
+        self._phrase_cap = _cap("PHRASE — commas separate alternatives")
+        self._phrase = _edit(cfg["phrase"])
+        self._spoken_cap = _cap("SOUNDS LIKE — optional, in English letters")
+        self._spoken = _edit(cfg["spoken_as"])
+        self._spoken.setPlaceholderText("automatic, e.g. HEY MARKO")
+        self._lang_cap = _cap("LANGUAGE of the phrase")
+        self._lang = _combo([("Українська", "uk"), ("English", "en")], cfg["vosk_lang"])
+
+        self._sens_cap = _cap("")
+        self._sens = QSlider(Qt.Orientation.Horizontal)
+        self._sens.setRange(0, 100)
+        self._sens.setValue(int(round(cfg["sensitivity"] * 100)))
+        self._sens.valueChanged.connect(self._update_sens_caption)
+        lay.addWidget(self._sens)
+
+        row = QHBoxLayout(); row.setSpacing(6)
+        self._follow = QCheckBox("Sleep again after each answer, in")
+        self._follow.setFont(QFont("Courier New", 8))
+        self._follow.setChecked(cfg["follow_up"])
+        row.addWidget(self._follow)
+        self._follow_s = QSpinBox()
+        self._follow_s.setRange(4, 60)
+        self._follow_s.setSuffix(" s")
+        self._follow_s.setValue(cfg["follow_up_seconds"])
+        row.addWidget(self._follow_s)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        row = QHBoxLayout(); row.setSpacing(6)
+        lbl = QLabel("Otherwise sleep after silence of")
+        lbl.setFont(QFont("Courier New", 8))
+        lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        row.addWidget(lbl)
+        self._timeout_s = QSpinBox()
+        self._timeout_s.setRange(15, 3600)
+        self._timeout_s.setSingleStep(15)
+        self._timeout_s.setSuffix(" s")
+        self._timeout_s.setValue(cfg["sleep_timeout_seconds"])
+        row.addWidget(self._timeout_s)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        self._chime = QCheckBox("Chime when it wakes")
+        self._chime.setFont(QFont("Courier New", 8))
+        self._chime.setChecked(cfg["chime"])
+        lay.addWidget(self._chime)
+
+        self._hint = QLabel("")
+        self._hint.setWordWrap(True)
+        self._hint.setFont(QFont("Courier New", 7))
+        self._hint.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addSpacing(4)
+        lay.addWidget(self._hint)
+
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        self._status.setFont(QFont("Courier New", 8))
+        lay.addWidget(self._status)
+        self._dl_btn = QPushButton("⬇  DOWNLOAD THIS ENGINE")
+        self._dl_btn.setFixedHeight(28)
+        self._dl_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._dl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dl_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {C.ACC2}; "
+            f"border: 1px solid {C.ACC2}; border-radius: 3px; }}"
+            f"QPushButton:disabled {{ color: {C.TEXT_DIM}; border-color: {C.BORDER}; }}")
+        self._dl_btn.clicked.connect(self._download)
+        lay.addWidget(self._dl_btn)
+
+        row = QHBoxLayout(); row.setSpacing(8)
+        ok = QPushButton("▸  APPLY")
+        ok.setFixedHeight(32)
+        ok.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        ok.clicked.connect(self._apply)
+        row.addWidget(ok)
+        cancel = QPushButton("CLOSE")
+        cancel.setFixedHeight(32)
+        cancel.setFont(QFont("Courier New", 9))
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px; }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        cancel.clicked.connect(self.hide)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+
+        self._installing = False
+        self._status_sig.connect(self._refresh)
+        for sig in (self._engine.currentIndexChanged, self._oww.currentIndexChanged,
+                    self._lang.currentIndexChanged):
+            sig.connect(self._refresh)
+        self._oww_path.textChanged.connect(self._refresh)
+        self._refresh()
+
+    # ── Form state ───────────────────────────────────────────────────────────
+
+    def values(self) -> dict:
+        """The form as a wake_word config block."""
+        oww = self._oww.currentData() or self._oww_path.text().strip() or "hey_jarvis"
+        return {
+            "engine": self._engine.currentData(),
+            "phrase": self._phrase.text().strip(),
+            "spoken_as": self._spoken.text().strip(),
+            "sensitivity": self._sens.value() / 100.0,
+            "oww_model": oww,
+            "vosk_lang": self._lang.currentData(),
+            "follow_up": self._follow.isChecked(),
+            "follow_up_seconds": self._follow_s.value(),
+            "sleep_timeout_seconds": self._timeout_s.value(),
+            "chime": self._chime.isChecked(),
+        }
+
+    def _settings(self):
+        from core.wake_engines import WakeSettings
+        from memory.config_manager import WAKE_MODELS_DIR
+        return WakeSettings.from_config(self.values(), self._name, WAKE_MODELS_DIR)
+
+    def _update_sens_caption(self, v: int | None = None):
+        v = self._sens.value() if v is None else v
+        word = "strict" if v < 34 else ("eager" if v > 66 else "balanced")
+        self._sens_cap.setText(f"SENSITIVITY — {v}% ({word}; higher wakes more easily)")
+
+    def _refresh(self, *_a):
+        from core.wake_engines import engine_class
+        eng = self._engine.currentData()
+        is_oww, is_vosk = eng == "openwakeword", eng == "vosk"
+        custom = is_oww and not self._oww.currentData()
+        for w in (self._oww_cap, self._oww):
+            w.setVisible(is_oww)
+        for w in (self._oww_path, self._oww_browse):
+            w.setVisible(custom)
+        for w in (self._phrase_cap, self._phrase):
+            w.setVisible(not is_oww)
+        for w in (self._spoken_cap, self._spoken):
+            w.setVisible(eng == "sherpa")
+        for w in (self._lang_cap, self._lang):
+            w.setVisible(is_vosk)
+        n = self._name.lower()
+        self._phrase.setPlaceholderText(f"default: {n if is_vosk else 'hey ' + n}")
+        self._hint.setText(self._HINTS.get(eng, ""))
+        self._update_sens_caption()
+
+        s = self._settings()
+        ready = engine_class(eng).is_ready(s)
+        if self._installing:
+            self._status.setText("Downloading… progress is in the log.")
+            self._status.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        elif ready:
+            self._status.setText("✓ Installed. You will say: " + engine_class(eng)(s).label)
+            self._status.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+        elif custom and not self._oww_path.text().strip():
+            self._status.setText("Pick the model file.")
+            self._status.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        else:
+            self._status.setText("Not installed yet — download it once (a few to ~80 MB).")
+            self._status.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        self._dl_btn.setVisible(not ready)
+        self._dl_btn.setEnabled(not self._installing
+                                and not (custom and not self._oww_path.text().strip()))
+        self.adjustSize()
+
+    def _browse_model(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "openWakeWord model", "", "ONNX model (*.onnx)")
+        if path:
+            self._oww_path.setText(path)
+
+    def _download(self):
+        if self._installing:
+            return
+        self._installing = True
+        settings = self._settings()
+        self._refresh()
+
+        def work():
+            try:
+                from core.wake_word import install_and_download
+                ok, msg = install_and_download(logger=self._log, settings=settings)
+            except Exception as e:
+                ok, msg = False, str(e)
+            self._log(f"SYS: {'Wake word engine ready.' if ok else 'Wake word setup failed: ' + msg}")
+            self._installing = False
+            self._status_sig.emit()
+        threading.Thread(target=work, daemon=True, name="wake-install").start()
+
+    def _apply(self):
+        from memory.config_manager import save_wake_settings
+        save_wake_settings(self.values())
+        self.hide()
+        self.applied.emit()
+
+
 class MemoryOverlay(_HudOverlay):
     """Everything JARVIS has stored about you, and when it learned it.
 
@@ -2955,6 +3276,7 @@ class MainWindow(QMainWindow):
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
+    _chime_sig      = pyqtSignal()           # woken by voice — play the system chime
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
@@ -2997,6 +3319,7 @@ class MainWindow(QMainWindow):
         self.on_barge_in       = None   # callable: (enable: bool) -> None — voice interrupt
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self.wake_get_state    = None   # callable: () -> dict {enabled, awake, ready}
+        self.on_wake_settings  = None   # callable: () -> None — wake settings saved
         self._muted            = False
         self._current_file: str | None = None
         self._remote_overlay: RemoteKeyOverlay | None = None
@@ -3239,6 +3562,7 @@ class MainWindow(QMainWindow):
         self._video_mute_sig.connect(self._on_video_mute)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
+        self._chime_sig.connect(QApplication.beep)
         self._quiz_sig.connect(self._show_quiz)
         self._quiz_hide_sig.connect(self._hide_quiz)
         self._review_sig.connect(self._show_review)
@@ -4230,6 +4554,14 @@ class MainWindow(QMainWindow):
         cust_btn.setStyleSheet(_BTN_STYLE_DIM)
         cust_btn.clicked.connect(self._open_customize)
         lay.addWidget(cust_btn)
+
+        wake_set_btn = QPushButton("🎙  WAKE WORD SETUP")
+        wake_set_btn.setFixedHeight(26)
+        wake_set_btn.setFont(QFont("Courier New", 7))
+        wake_set_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        wake_set_btn.setStyleSheet(_BTN_STYLE_DIM)
+        wake_set_btn.clicked.connect(self._open_wake_settings)
+        lay.addWidget(wake_set_btn)
 
         audio_btn = QPushButton("🎧  AUDIO DEVICES")
         audio_btn.setFixedHeight(26)
@@ -5366,6 +5698,7 @@ class MainWindow(QMainWindow):
     def _apply_name_update(self, name: str, user_name: str, ui_color: str = "",
                            voice: str = ""):
         """Update all name/theme-dependent UI elements and persist to config."""
+        name_changed = (name.strip() or "JARVIS") != self._assistant_name
         self._assistant_name = name.strip() or "JARVIS"
         display = self._assistant_name.upper()
         self.setWindowTitle(f"{display} — {APP_VERSION}")
@@ -5411,6 +5744,12 @@ class MainWindow(QMainWindow):
 
         if voice_changed and self.on_voice_change:
             self.on_voice_change()
+        # An unset wake phrase is derived from the name ("hey <name>").
+        if name_changed and self.on_wake_settings:
+            try:
+                self.on_wake_settings()
+            except Exception:
+                pass
 
     def _centre_overlay(self, ov) -> None:
         """Place a floating overlay in the middle of the HUD and show it."""
@@ -5431,6 +5770,23 @@ class MainWindow(QMainWindow):
         ov.picked.connect(self._on_audio_devices_applied)
         self._centre_overlay(ov)
         self._audio_overlay = ov            # keep a reference so it isn't GC'd
+
+    def _open_wake_settings(self):
+        def log(m: str) -> None:
+            self._log_sig.emit(m if m.startswith(("SYS:", "ERR:")) else f"SYS: {m}")
+        ov = WakeWordOverlay(log=log, parent=self.centralWidget())
+        ov.applied.connect(self._on_wake_settings_applied)
+        self._centre_overlay(ov)
+        self._wake_overlay = ov             # keep a reference so it isn't GC'd
+
+    def _on_wake_settings_applied(self):
+        self._log.append_log("SYS: Wake word settings saved.")
+        if self.on_wake_settings:
+            try:
+                self.on_wake_settings()
+            except Exception as e:
+                self._log.append_log(f"ERR: Wake word — {e}")
+        self._refresh_wake_btns()
 
     def _on_audio_devices_applied(self):
         self._log.append_log("SYS: Audio devices updated.")
@@ -5730,6 +6086,18 @@ class JarvisUI:
     @on_wake_manual.setter
     def on_wake_manual(self, cb):
         self._win.on_wake_manual = cb
+
+    @property
+    def on_wake_settings(self):
+        return self._win.on_wake_settings
+
+    @on_wake_settings.setter
+    def on_wake_settings(self, cb):
+        self._win.on_wake_settings = cb
+
+    def chime(self) -> None:
+        """Thread-safe: the short system sound that says 'I'm listening'."""
+        self._win._chime_sig.emit()
 
     @property
     def wake_get_state(self):
