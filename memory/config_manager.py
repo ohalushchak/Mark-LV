@@ -207,6 +207,21 @@ def save_voice_barge_in_enabled(enabled: bool) -> None:
     _save_flag("voice_barge_in_enabled", enabled)
 
 
+BARGE_IN_MODES = ("voice", "name")
+
+
+def get_voice_barge_in_mode() -> str:
+    """What may interrupt: "voice" = any voice heard over the answer, "name" =
+    only the wake phrase (immune to a television, needs a wake-word engine)."""
+    v = str(load_api_keys().get("voice_barge_in_mode", "voice")).strip().lower()
+    return v if v in BARGE_IN_MODES else "voice"
+
+
+def save_voice_barge_in_mode(mode: str) -> None:
+    m = str(mode or "").strip().lower()
+    _save_flag("voice_barge_in_mode", m if m in BARGE_IN_MODES else "voice")
+
+
 HUD_STYLES = ("face", "core")
 
 

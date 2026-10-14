@@ -13,8 +13,8 @@ who replies instantly, instead of blanket-muting.
 Interrupting mid-sentence by voice is the other use. `core.barge_in.BargeIn`
 asks this guard about every microphone block heard while JARVIS speaks and adds
 the sustained-evidence and cooldown rules a single block cannot know. It
-depends on the listener's room, so it is opt-in: the "INTERRUPT BY VOICE"
-setting, off by default.
+depends on the listener's room, so it is opt-in: the "INTERRUPT" setting, off
+by default.
 
 The problem with a level test
 -----------------------------
@@ -135,6 +135,8 @@ class EchoGuard:
         self._floor = 0.10        # typical echo residual here; learned
         self._run = 0             # consecutive blocks called speech
         self._head = 0.13         # near-worst echo residual here; learned
+        self._last_res = 0.0      # residual of the last block judged
+        self._echo_blocks = 0     # echo blocks learned from, ever (not windowed)
 
     # ── diagnostics, for the log and for tests ──────────────────────────────
 
@@ -173,6 +175,19 @@ class EchoGuard:
         return _BLOCKS_NORMAL if self.reliable else _BLOCKS_NOISY
 
     @property
+    def last_residual(self) -> float:
+        """Share of the last block our own output could not explain: 0.0 for
+        silence or pure echo, 1.0 for a sound with nothing playing."""
+        return self._last_res
+
+    @property
+    def echo_blocks(self) -> int:
+        """How many blocks of this room's echo the guard has learned from.
+        Unlike the 60-block window behind the threshold, this only grows: it
+        says how much evidence the room characterisation rests on."""
+        return self._echo_blocks
+
+    @property
     def last_similarity(self) -> float:
         """1.0 = fully explained by our own output, 0.0 = nothing to do with it."""
         return self._last_sim
@@ -205,7 +220,9 @@ class EchoGuard:
                 # far from the speaker). Record that, or the window stays
                 # empty and the first person to speak gets mistaken for
                 # the calibration sample.
+                self._last_res = 0.0
                 if self._hist and max(h[2] for h in self._hist) > 0.15:
+                    self._echo_blocks += 1
                     self._residuals.append(0.0)
                     if len(self._residuals) > _FLOOR_WINDOW:
                         del self._residuals[:-_FLOOR_WINDOW]
@@ -216,12 +233,14 @@ class EchoGuard:
                 return False
             if not self._hist:
                 # Nothing playing that we know of — anything audible is theirs.
+                self._last_res = 1.0
                 return True
 
             t = time.monotonic() if when is None else when
             bands = band_energies(pcm, sr)
             total = float(bands.sum())
             if total <= 1e-9:
+                self._last_res = 0.0
                 return False
 
             # Find the recent output slice that best explains this block, and
@@ -240,6 +259,7 @@ class EchoGuard:
                 if ratio < best_res:
                     best_res, best_level = ratio, ref_level
             self._last_sim = 1.0 - best_res
+            self._last_res = best_res
 
             # Nothing in the window explained it at all — that is not our sound.
             if best_level <= 0.0:
@@ -272,6 +292,7 @@ class EchoGuard:
                 return True
 
             self._run = 0
+            self._echo_blocks += 1
             self._residuals.append(best_res)
             if len(self._residuals) > _FLOOR_WINDOW:
                 del self._residuals[:-_FLOOR_WINDOW]

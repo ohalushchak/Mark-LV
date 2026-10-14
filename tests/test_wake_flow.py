@@ -63,6 +63,8 @@ def _jarvis(**cfg):
     j._out_latency = 0.2
     j._tail_until = 0.0
     j._barge_enabled = False
+    j._barge_mode = "voice"
+    j._barge_hold = None
     j._wake_enabled = True
     j._awake = False
     j._wake_detector = _Det()
@@ -88,7 +90,7 @@ def _blocks(j, n):
 def test_asleep_blocks_are_numbered_kept_and_heard():
     j = _jarvis()
     _blocks(j, 5)
-    assert [s for s, _ in j._wake_ring] == [1, 2, 3, 4, 5]
+    assert [s for s, _b, _mine in j._wake_ring] == [1, 2, 3, 4, 5]
     assert j._wake_detector.fed == [1, 2, 3, 4, 5]
 
 
@@ -153,6 +155,13 @@ def test_follow_up_mode_sleeps_a_few_seconds_after_the_answer():
     j._answer_ended_at = t0 + 5
     assert j._sleep_due(t0 + 14) is None
     assert j._sleep_due(t0 + 16) == "no follow-up for 10 s"
+
+
+def test_never_sleeps_during_a_barge_in_pause():
+    j = _jarvis(follow_up=True, follow_up_seconds=4)
+    j._awake = True
+    j._barge_hold = [b"held"]
+    assert j._sleep_due(j._woke_at + 60) is None
 
 
 def test_never_sleeps_mid_answer_or_mid_tool():
