@@ -15,7 +15,7 @@ Technologies, environment and constraints. Exact package versions live in `requi
 
 - Development machine: Windows 11. The app must still run on macOS and Linux; per-OS packages carry `sys_platform` markers.
 - Mic input: 16 kHz, 1024-sample blocks (64 ms), delivered as `(frames, channels)` int16 arrays. Model output: 24 kHz PCM.
-- Tests run with `pytest` and need no audio device, UI or API key. Expect a harmless `pynvml` FutureWarning from `ui.py` import.
+- Tests run with `pytest` and need no audio device, window or API key; HUD tests draw widgets on Qt's `offscreen` platform (`tests/test_hud.py`). Offscreen Qt on Windows has no fonts (text renders as boxes), so text layout is checked by grabbing a never-shown `MainWindow` on the normal platform instead. Expect a harmless `pynvml` FutureWarning from `ui.py` import.
 - Global push-to-talk works only on Windows (`GetAsyncKeyState`); elsewhere it is window-scoped.
 - The sherpa KWS model is English-only: Ukrainian names are transliterated (`core/wake_engines/translit.py`) or typed as "sounds like". The small Ukrainian Vosk model supports grammars, knows common names (марко, олена, богдан) but not "джарвіс".
 - Picovoice Porcupine is not an option: its free tier ended on 2026-06-30.

@@ -27,6 +27,7 @@ It's not just an assistant — it's an extension of your digital life.
 | Feature | Description |
 |---|---|
 | 🧑‍🎤 Holographic Avatar | An animated human head in the HUD — real facial geometry, lit and drawn in software, no GPU or extra packages |
+| 🌀 Four HUD Styles | The holographic head, a reactor core, a wireframe orb that spins with the state and ripples with the voice, or a drawn anime face with the same lip-sync and expressions |
 | 👄 Real Lip-Sync | ~50 mouth shapes a second from the audio's formants **and** the transcript — closures, spreads and rounds, not a volume meter |
 | 🌍 Language-Free Mouth | Articulation is derived by Unicode reduction, so Latin, Cyrillic and Greek scripts all work from one rule set — and scripts that hide pronunciation fall back cleanly |
 | 🙂 Facial Acting | Brows track the phrase, gaze saccades between fixations, natural blinking, a small nod on stressed syllables |
@@ -48,7 +49,9 @@ It's not just an assistant — it's an extension of your digital life.
 | 📺 Video on the HUD | Plays YouTube, a local file or any video URL **where the avatar sits** — starts muted, sound on request |
 | 🪜 Model Ladder | Nine Gemini models in one measured order — a quota, a timeout or an outage steps to the next rung instead of failing |
 | 🎙️ Real-time Voice | Ultra-low latency conversation in any language via Gemini Live API |
-| 🎨 Live Theming | Recolour the entire HUD from a hue wheel or hex — the avatar retints with it |
+| 🎨 Live Theming | Recolour the entire HUD from a hue wheel or hex — the avatar retints with it. A soft, low-glare slate theme sits beside the original neon |
+| 🔠 Readable Text | One TEXT SIZE setting (100–150 %) for every label, a crisp per-OS monospace font, and captions that type the latest answer under the HUD in large text |
+| 🔵 Desktop Orb | With the JARVIS window minimised or behind another app, a small orb at the top of your screen shows it talking — only while it speaks, or all the time (listening, thinking, muted) |
 | 〰️ Reactive HUD | Waveform pulses to real audio — your mic while listening, JARVIS while speaking |
 | 🎙️ Voice Picker | Choose from 5 native Gemini voices and switch live from the UI — no restart |
 | ♾️ Unlimited Sessions | Sliding-window context compression — one conversation can last for hours |
@@ -100,7 +103,7 @@ So there are two players running together, with a timer that corrects any drift 
 The microphone is open while a video plays, so the moment you turn the sound on, JARVIS starts answering the film. The mic now mutes itself when the video's sound goes on and unmutes when it goes off — and it says so in the activity log rather than going deaf silently.
 
 #### 🎛 Two drawers instead of one
-⚙ **SETUP** holds the things you set once — remote control, desktop shortcut, auto-start, customisation and wake-word setup. 🎛 **CONTROLS** holds the switches you flick daily — fullscreen, morning brief, wake word, sleep, push-to-talk, HUD style. Only one is open at a time, and each sits under its own header button.
+⚙ **SETUP** holds the things you set once — remote control, desktop shortcut, auto-start, customisation and wake-word setup. 🎛 **CONTROLS** holds the switches you flick daily — fullscreen, morning brief, wake word, sleep, push-to-talk, interrupt mode, HUD style, theme, text size, captions and the desktop orb. Only one is open at a time, and each sits under its own header button.
 
 The panel used to stutter when it opened, and the obvious explanation — too many buttons — was wrong. Measured, the **first** wake-word state check took **2.104 seconds**, because it imported `openwakeword` on the UI thread the moment the drawer was built. That import now happens off-thread at boot, and the drawer opens instantly whether it has six buttons or sixteen.
 
@@ -338,6 +341,8 @@ Mark LV/
 │   ├── gemini.py             # One place for every one-shot Gemini call — model ladder, timeouts, cooldowns
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup
 │   ├── avatar.py             # Avatar renderer — lighting, pose, expression, mouth (QPainter)
+│   ├── anime_avatar.py       # Anime face HUD style — the avatar's animation, drawn as vector art
+│   ├── orb_hud.py            # Wireframe orb HUD style (also drawn by the desktop orb)
 │   ├── avatar_mesh.py        # Head geometry — loads the face, generates skull/neck/rigs
 │   ├── face_model.obj        # The face itself (MediaPipe canonical model, Apache-2.0, 25 KB)
 │   ├── viseme.py             # Transcript → mouth shapes, fused with the audio's timing

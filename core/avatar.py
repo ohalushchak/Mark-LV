@@ -30,7 +30,8 @@ import random
 
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF, QRadialGradient
+from PyQt6.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPainterPath,
+                         QPen, QPolygonF, QRadialGradient)
 
 from core.avatar_mesh import JAW_MAX, JAW_PIVOT, get_head_mesh
 
@@ -52,6 +53,12 @@ _LUT_N = 192
 # tuned: the brow-to-eye gap is 0.198 and a real raise covers about a third of
 # it, then the drawn landmarks only carry half the rig weight.
 _BROW_LIFT = 0.14
+
+# Corner lift of a full smile, in head-half-heights, and how much of the
+# smooth vertex normal is mixed into each facet's flat one. A little smoothing
+# softens the low-poly look without blurring the nose/lip/brow relief away.
+_SMILE_LIFT = 0.10
+_SMOOTH = 0.50
 
 # Mouth timing, as time constants in seconds rather than per-frame fractions.
 # A fixed per-frame lerp silently changes speed with the frame rate: the HUD
@@ -144,6 +151,9 @@ class HoloAvatar:
         # keeps an open mouth from reading as a hole punched in the face.
         lips_in = mesh["landmarks"]["lips_in"]
         self._lip_up = np.concatenate([lips_in[10:], lips_in[:1]])
+        self._lip_lo = lips_in[:11]
+        lo = self._v0[mesh["landmarks"]["lips_out"], 0]
+        self._mouth_hw = max(1e-3, float(lo.max() - lo.min()) * 0.5)
 
         # Crown (+1.0) down to the bottom of the neck, in head-half-heights.
         # Callers size the head to the room they have with this.
@@ -191,6 +201,7 @@ class HoloAvatar:
         self._lids = 1.0           # 1 = wide, 0 = shut; low while asleep
         self._brow_bias = 0.0      # concentration pulls the brows down
         self._glance = None        # (dx, dy, until_t) — a deliberate look
+        self._smile = 0.0          # 0 neutral .. 1 warm smile, mouth corners up
 
         # ── viseme ──────────────────────────────────────────────────────────
         # Loudness alone only answers "how far open", which is why an RMS-driven
@@ -276,7 +287,8 @@ class HoloAvatar:
         s = self._sway
         self._yaw = 0.26 * math.sin(s * 0.31) + 0.09 * math.sin(s * 0.73 + 1.3)
         self._pitch = (0.060 * math.sin(s * 0.23 + 0.7)
-                       + 0.024 * math.sin(s * 0.61))
+                       + 0.024 * math.sin(s * 0.61)
+                       + 0.010 * math.sin(t * 1.3))       # slow breath
 
         # Mouth. Which level is driving it matters more than any rate here.
         #
@@ -358,6 +370,19 @@ class HoloAvatar:
             self._bias_at = 0.0
             brow_bias = 0.10 if st == "LISTENING" else 0.0
             lid_tgt = 1.0
+
+        # A resting face that faces the user should look friendly, not blank:
+        # a soft smile while listening or idle, less while talking (the jaw
+        # does the work then), none while concentrating.
+        if muted or asleep:
+            smile_t = 0.10
+        elif thinking:
+            smile_t = 0.0
+        elif live:
+            smile_t = 0.30
+        else:
+            smile_t = 0.60
+        self._smile += (smile_t - self._smile) * _rate(dt, 0.45)
 
         for i in (0, 1):
             self._gaze_bias[i] += (self._bias_tgt[i] - self._gaze_bias[i]) * 0.06
@@ -447,6 +472,14 @@ class HoloAvatar:
             v[:, 1] += k * (v[:, 1] - self._lip_c[1]) * 0.30
             v[:, 2] -= k * 0.055
 
+        if self._smile > 0.01:
+            # Corners rise on a parabola across the mouth, so the centre stays
+            # put and only the ends curl — that curve is what reads as a smile.
+            d = np.clip((v[:, 0] - self._lip_c[0]) / self._mouth_hw, -1.6, 1.6)
+            k = self._lips_w * self._smile
+            v[:, 1] += k * (d * d) * _SMILE_LIFT
+            v[:, 0] += k * d * (0.012 * self._mouth_hw / 0.25)
+
         if self._mouth > 0.004:
             px, py, pz = JAW_PIVOT
             ang = self._jaw * (self._mouth * JAW_MAX)
@@ -528,6 +561,9 @@ class HoloAvatar:
         # negate x and y as well and scramble the lighting into moiré.
         ref = norms[a] + norms[b] + norms[c]
         fn *= np.sign((fn * ref).sum(1))[:, None]
+        ref /= np.maximum(np.linalg.norm(ref, axis=1, keepdims=True), 1e-9)
+        fn = fn * (1.0 - _SMOOTH) + ref * _SMOOTH
+        fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-9)
 
         nz = fn[:, 2]
         area = np.abs((xs[b] - xs[a]) * (ys[c] - ys[a])
@@ -648,32 +684,71 @@ class HoloAvatar:
         vis = 1.0 - self._blink
 
         # ── eyes ────────────────────────────────────────────────────────────
+        # Openness combines the blink with the resting lid height, so a sleepy
+        # or sleeping face really does show heavy lids. The upper lid travels
+        # most, as on a real face; the lower lid barely moves.
+        open_ = vis * self._lids
         for key in ("eye_l", "eye_r"):
             idx = lm[key]
             ex, ey = xs[idx], ys[idx]
             mid_y = float(ey.mean())
-            if vis < 0.999:
-                ey = mid_y + (ey - mid_y) * max(0.04, vis)
+            if open_ < 0.999:
+                up = ey < mid_y
+                ey = np.where(up, mid_y + (ey - mid_y) * max(0.04, open_),
+                              mid_y + (ey - mid_y) * (0.55 + 0.45 * open_))
             poly = QPolygonF([QPointF(float(a), float(b)) for a, b in zip(ex, ey)])
+            br = poly.boundingRect()
 
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(_blend(bg, primary, 22)))       # socket shadow
-            p.drawPolygon(poly)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(_c(primary, 210 * face), 1.3))      # lid line
+            if open_ > 0.15:
+                # A soft halo makes the eyes the first thing you notice.
+                hr = br.width() * 0.85
+                halo = QRadialGradient(br.center(), hr)
+                halo.setColorAt(0.0, _c(_blend(primary, QColor(255, 255, 255), 120),
+                                        70 * face * open_ * (0.7 + 0.6 * amp)))
+                halo.setColorAt(1.0, _c(primary, 0))
+                p.setBrush(QBrush(halo))
+                p.drawEllipse(br.center(), hr, hr * 0.7)
+
+            p.setBrush(QBrush(_blend(bg, primary, 46)))       # sclera
             p.drawPolygon(poly)
 
-            if vis > 0.35:
-                br = poly.boundingRect()
-                gx = br.center().x() + self._gaze[0] * br.width() * 0.16
-                gy = br.center().y() + self._gaze[1] * br.height() * 0.20
+            if open_ > 0.12:
+                gx = br.center().x() + self._gaze[0] * br.width() * 0.17
+                gy = br.center().y() + self._gaze[1] * br.height() * 0.18
                 cpt = QPointF(gx, gy)
-                rad = min(br.height() * 0.62, br.width() * 0.20)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(_c(accent, (70 + 60 * amp) * face * vis)))
-                p.drawEllipse(cpt, rad, rad * vis)            # iris
-                p.setBrush(QBrush(_c(accent, 245 * face * vis)))
-                p.drawEllipse(cpt, rad * 0.42, rad * 0.42 * vis)   # pupil
+                # Sized from the *open* eye so the lids cover the iris instead
+                # of squashing it — that overlap is what makes an eye read
+                # as round.
+                full_h = br.height() / max(0.04, open_ if open_ < 0.999 else 1.0)
+                rad = min(full_h * 0.58, br.width() * 0.25)
+                p.save()
+                clip = QPainterPath()
+                clip.addPolygon(poly)
+                p.setClipPath(clip)
+                iris = QRadialGradient(cpt, rad)
+                iris.setColorAt(0.00, _c(accent, 255 * face))
+                iris.setColorAt(0.45, _c(accent, (190 + 50 * amp) * face))
+                iris.setColorAt(0.85, _c(accent, 120 * face))
+                iris.setColorAt(1.00, _c(_blend(bg, accent, 90), 230 * face))
+                p.setBrush(QBrush(iris))
+                p.drawEllipse(cpt, rad, rad)                       # iris
+                p.setBrush(QBrush(_c(_blend(bg, accent, 40), 245 * face)))
+                p.drawEllipse(cpt, rad * 0.40, rad * 0.40)         # pupil
+                p.setBrush(QBrush(_c(QColor(255, 255, 255), 230 * face)))
+                hl = rad * 0.20
+                p.drawEllipse(QPointF(gx - rad * 0.32, gy - rad * 0.34), hl, hl)
+                # Upper-lid shadow over the top of the iris.
+                lid = QLinearGradient(0.0, br.top(), 0.0, br.top() + br.height() * 0.45)
+                lid.setColorAt(0.0, _c(bg, 150))
+                lid.setColorAt(1.0, _c(bg, 0))
+                p.setBrush(QBrush(lid))
+                p.drawRect(br)
+                p.restore()
+
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(_c(primary, 225 * face), 1.5))      # lid line
+            p.drawPolygon(poly)
 
         # ── brows ───────────────────────────────────────────────────────────
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -702,6 +777,15 @@ class HoloAvatar:
             pts += [QPointF(float(x), float(y) + th)
                     for x, y in zip(ux[::-1], uy[::-1])]
             p.setBrush(QBrush(_blend(bg, primary, 150 + 60 * self._mouth)))
+            p.drawPolygon(QPolygonF(pts))
+
+            # Lower teeth: a thinner, dimmer strip, mostly hidden by the lip.
+            lx, ly = xs[self._lip_lo], ys[self._lip_lo]
+            th2 = open_h * 0.14
+            pts = [QPointF(float(x), float(y)) for x, y in zip(lx, ly)]
+            pts += [QPointF(float(x), float(y) - th2)
+                    for x, y in zip(lx[::-1], ly[::-1])]
+            p.setBrush(QBrush(_blend(bg, primary, 95 + 40 * self._mouth)))
             p.drawPolygon(QPolygonF(pts))
 
             # A warm pool at the back of the throat, strongest when wide open.
