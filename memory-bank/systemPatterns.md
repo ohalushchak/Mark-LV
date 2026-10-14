@@ -29,7 +29,3 @@ How the running system fits together. The rules for writing code live in `AGENTS
 
 - `config/api_keys.json` (via `memory/config_manager.py`): key, identity, voice, colour, feature toggles, plugin settings.
 - `memory/long_term.json` (via `memory/memory_manager.py`): long-term memory, session summaries, monitored topics. Only a ~900-character core block rides in the system prompt; the rest is fetched on demand by the `recall_memory` tool.
-
-## Legacy modules
-
-`core/llm_client.py`, `core/stt.py`, `core/tts.py` and `core/installer.py` are leftovers from an earlier Mark (they say "MARK XL"). Nothing imports them.
