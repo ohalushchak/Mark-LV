@@ -130,6 +130,16 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
 
+def get_voice_barge_in_enabled() -> bool:
+    """Talk over JARVIS to interrupt it. Off by default: how well it works
+    depends on the room, the speakers and the microphone."""
+    return load_api_keys().get("voice_barge_in_enabled", False)
+
+
+def save_voice_barge_in_enabled(enabled: bool) -> None:
+    _save_flag("voice_barge_in_enabled", enabled)
+
+
 HUD_STYLES = ("face", "core")
 
 

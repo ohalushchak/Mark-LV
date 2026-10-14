@@ -2994,6 +2994,7 @@ class MainWindow(QMainWindow):
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
+        self.on_barge_in       = None   # callable: (enable: bool) -> None — voice interrupt
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self.wake_get_state    = None   # callable: () -> dict {enabled, awake, ready}
         self._muted            = False
@@ -4308,6 +4309,8 @@ class MainWindow(QMainWindow):
 
         self._ptt_btn = _row(QPushButton())
         self._ptt_btn.clicked.connect(self._toggle_ptt)
+        self._barge_btn = _row(QPushButton())
+        self._barge_btn.clicked.connect(self._toggle_barge_in)
         self._refresh_talk_btns()
 
         self._hud_btn = _row(QPushButton())
@@ -5136,6 +5139,19 @@ class MainWindow(QMainWindow):
             "while you are not holding it." if ptt
             else "Hold a key to talk instead of streaming the mic continuously.")
 
+        if hasattr(self, "_barge_btn"):
+            from memory.config_manager import get_voice_barge_in_enabled
+            barge = get_voice_barge_in_enabled()
+            self._barge_btn.setText("🗣  INTERRUPT BY VOICE: ON" if barge
+                                    else "🗣  INTERRUPT BY VOICE: OFF")
+            self._barge_btn.setStyleSheet(_on if barge else _off)
+            self._barge_btn.setToolTip(
+                "Start talking while JARVIS speaks and it stops to listen. Its own "
+                "voice from the speakers is told apart from yours; headphones make "
+                "that easiest." if barge
+                else "Let talking over JARVIS interrupt it. Experimental: how well "
+                     "it works depends on your room, speakers and microphone.")
+
 
     def _refresh_hud_btn(self):
         from memory.config_manager import get_hud_style
@@ -5188,6 +5204,23 @@ class MainWindow(QMainWindow):
                 want = False
         self._apply_ptt_shortcut(want and scope != "global")
         self._refresh_talk_btns()
+
+    def _toggle_barge_in(self):
+        from memory.config_manager import (get_voice_barge_in_enabled,
+                                           save_voice_barge_in_enabled)
+        want = not get_voice_barge_in_enabled()
+        save_voice_barge_in_enabled(want)
+        if self.on_barge_in:
+            try:
+                self.on_barge_in(want)
+            except Exception as e:
+                self._log.append_log(f"ERR: Voice interrupt failed — {e}")
+                save_voice_barge_in_enabled(False)
+                want = False
+        self._refresh_talk_btns()
+        self._log.append_log(
+            "SYS: Interrupt by voice on — talk over JARVIS to stop it." if want
+            else "SYS: Interrupt by voice off.")
 
     def _apply_ptt_shortcut(self, needed: bool):
         """Bind the chord inside the window when no global hook is available.
@@ -5738,6 +5771,14 @@ class JarvisUI:
     @on_push_to_talk.setter
     def on_push_to_talk(self, cb):
         self._win.on_push_to_talk = cb
+
+    @property
+    def on_barge_in(self):
+        return self._win.on_barge_in
+
+    @on_barge_in.setter
+    def on_barge_in(self, cb):
+        self._win.on_barge_in = cb
 
     def push_visemes(self, frames, hop: float, at: float) -> None:
         """Thread-safe: post a schedule of (level, openness, width) mouth frames
