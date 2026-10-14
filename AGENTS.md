@@ -2,6 +2,10 @@
 
 MARK LIV/LV ("JARVIS"): a cross-platform desktop voice assistant. `main.py` runs the Gemini Live session, audio I/O and tool dispatch; `ui.py` is the PyQt6 HUD. The file-by-file map lives in `readme.md` → *Project Structure*; setup and run commands live in `readme.md` → *Quick Start*.
 
+## Commits
+
+Commit only when the user's current message asks for a commit; a request to commit covers that one commit, not later changes. Leave finished work uncommitted and say so.
+
 ## Memory bank
 
 `memory-bank/` is the project's persistent context across agent sessions. It is unrelated to `memory/`, which is the assistant's own runtime memory.
