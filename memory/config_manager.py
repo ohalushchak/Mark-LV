@@ -121,6 +121,73 @@ def save_wake_word_enabled(enabled: bool) -> None:
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
 
+# ── Wake word: engine, phrase and timing ─────────────────────────────────────
+# One nested block, like turn_tuning. Every key has a working default, so an
+# untouched config keeps the original behaviour: openWakeWord, "Hey Jarvis",
+# asleep again after two minutes of silence.
+
+WAKE_ENGINES     = ("openwakeword", "sherpa", "vosk")
+WAKE_VOSK_LANGS  = ("uk", "en")
+WAKE_MODELS_DIR  = CONFIG_DIR / "wake_models"
+
+_WAKE_DEFAULTS = {
+    "engine":            "openwakeword",
+    # Empty = derived from the assistant's name ("hey <name>"), so renaming
+    # the assistant renames the wake phrase with it.
+    "phrase":            "",
+    # How the phrase sounds, in English letters, for the English-only sherpa
+    # model. Empty = transliterated automatically from `phrase`.
+    "spoken_as":         "",
+    "sensitivity":       0.5,
+    # Pretrained openWakeWord name, or a path to a custom .onnx model.
+    "oww_model":         "hey_jarvis",
+    "vosk_lang":         "uk",
+    # Sleep a few seconds after each answer instead of after a long silence.
+    "follow_up":         False,
+    "follow_up_seconds": 10,
+    "sleep_timeout_seconds": 120,
+    "chime":             True,
+}
+
+
+def get_wake_settings() -> dict:
+    """Validated wake-word settings; bad or missing values fall back to defaults."""
+    cfg = load_api_keys().get("wake_word")
+    cfg = cfg if isinstance(cfg, dict) else {}
+    out = dict(_WAKE_DEFAULTS)
+
+    def _int(key, lo, hi):
+        try:
+            return max(lo, min(hi, int(cfg.get(key, out[key]))))
+        except (TypeError, ValueError):
+            return out[key]
+
+    eng = str(cfg.get("engine", out["engine"])).strip().lower()
+    out["engine"] = eng if eng in WAKE_ENGINES else _WAKE_DEFAULTS["engine"]
+    for key in ("phrase", "spoken_as"):
+        out[key] = str(cfg.get(key, "") or "").strip()[:80]
+    try:
+        out["sensitivity"] = max(0.0, min(1.0, float(cfg.get("sensitivity", 0.5))))
+    except (TypeError, ValueError):
+        pass
+    out["oww_model"] = str(cfg.get("oww_model", "") or "").strip() or "hey_jarvis"
+    lang = str(cfg.get("vosk_lang", "uk")).strip().lower()
+    out["vosk_lang"] = lang if lang in WAKE_VOSK_LANGS else "uk"
+    out["follow_up"] = bool(cfg.get("follow_up", False))
+    out["follow_up_seconds"] = _int("follow_up_seconds", 4, 60)
+    out["sleep_timeout_seconds"] = _int("sleep_timeout_seconds", 15, 3600)
+    out["chime"] = bool(cfg.get("chime", True))
+    return out
+
+
+def save_wake_settings(values: dict) -> None:
+    """Merge `values` into the wake-word block. Unknown keys are dropped."""
+    cur = load_api_keys().get("wake_word")
+    cur = dict(cur) if isinstance(cur, dict) else {}
+    cur.update({k: v for k, v in (values or {}).items() if k in _WAKE_DEFAULTS})
+    _patch_config(wake_word=cur)
+
+
 def get_push_to_talk_enabled() -> bool:
     """Hold-a-key-to-speak. When on, the mic is closed unless the chord is held."""
     return load_api_keys().get("push_to_talk_enabled", False)

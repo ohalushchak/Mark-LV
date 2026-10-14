@@ -73,7 +73,7 @@ from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
-    get_voice_barge_in_enabled,
+    get_voice_barge_in_enabled, get_wake_settings,
 )
 from core                     import gemini as _gemini
 from core.plugin_loader        import discover_plugins
@@ -85,12 +85,29 @@ from core.barge_in             import BargeIn
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
 from core.wake_word            import (
-    WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
+    Detection, WakeWordDetector, current_settings as wake_settings,
+    is_ready as wake_is_ready, install_and_download as wake_install,
+    phrase_label as wake_phrase_label,
 )
 
-# How long the assistant stays awake with no user speech before it auto-sleeps
-# again (wake-word mode only).
-WAKE_SLEEP_TIMEOUT = 120.0   # seconds (2 minutes)
+# While asleep the microphone blocks are kept for this long (94 × 64 ms ≈ 6 s)
+# so that, on waking, the model can be handed what was said after the wake
+# phrase. "Hey Jarvis, what's the weather" in one breath otherwise reached the
+# model as "…the weather": everything spoken while the detector was still
+# deciding was lost. Six seconds covers Vosk too, which decides only at the
+# end of the whole utterance.
+_WAKE_RING_BLOCKS = 94
+# Replay starts this much before the moment the phrase was judged complete,
+# so the first syllable of the command is never the one cut off. The tail of
+# the wake phrase it may carry along is harmless: the prompt says a turn may
+# start with it.
+_WAKE_REPLAY_BACK_S = 0.3
+# After falling asleep the detector ignores the microphone this long. Its own
+# last words, still leaving the speakers, woke it more reliably than the user.
+_WAKE_QUIET_S = 3.0
+# "Go to sleep" waits for the goodbye to finish playing. If no turn end ever
+# arrives, sleep anyway after this long.
+_SLEEP_REQUEST_MAX_S = 15.0
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -413,12 +430,25 @@ TOOL_DECLARATIONS = [
             "Shuts down the assistant completely. "
             "Call this when the user expresses intent to end the conversation, "
             "close the assistant, say goodbye, or stop Jarvis. "
-            "The user can say this in ANY language."
+            "The user can say this in ANY language. "
+            "Not for 'go to sleep' or 'stop listening' — that is sleep_assistant."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {},
         }
+    },
+    {
+        "name": "sleep_assistant",
+        "description": (
+            "Puts the assistant into sleep mode: it stops listening until the "
+            "user says the wake phrase again (or taps WAKE NOW). "
+            "Call when the user says go to sleep, stop listening, standby, "
+            "that's all for now, thanks that's it — in ANY language. "
+            "Finish your reply first; sleep starts when it has been spoken. "
+            "Not for closing the program — that is shutdown_jarvis."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
     {
         "name": "save_memory",
@@ -668,7 +698,18 @@ class JarvisLive:
         self._wake_enabled     = get_wake_word_enabled()
         self._awake            = not self._wake_enabled
         self._wake_detector: WakeWordDetector | None = None
-        self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
+        self._wake_lock        = threading.Lock()   # one detector load at a time
+        self._wake_cfg         = get_wake_settings()  # timing and chime
+        self._wake_label       = wake_phrase_label()  # "Hey Jarvis", or the user's phrase
+        # Microphone blocks heard while asleep, numbered so a detection can say
+        # where the phrase ended. Written by the audio thread only.
+        self._wake_ring: deque = deque(maxlen=_WAKE_RING_BLOCKS)
+        self._mic_seq          = 0
+        # Set by a voice wake: the first block number to hand to the model.
+        self._wake_replay_from: int | None = None
+        self._woke_at          = time.monotonic()
+        self._answer_ended_at  = 0.0      # when the last answer finished playing
+        self._sleep_requested  = 0.0      # "go to sleep" asked at this time; 0 = not asked
 
         # Restore the saved push-to-talk preference. Doing it here rather than
         # in __init__ means the hotkey thread only exists once there is a
@@ -684,36 +725,111 @@ class JarvisLive:
         self.ui.on_wake_toggle   = self._ui_wake_toggle   # (enable: bool) -> str
         self.ui.on_wake_manual   = self._ui_wake_manual   # () -> toggle awake/asleep
         self.ui.on_wake_install  = self._ui_wake_install  # () -> (ok, msg)
+        self.ui.on_wake_settings = self._ui_wake_settings_changed  # () -> None
 
     # ── Wake word: state machine ─────────────────────────────────────────────
 
     def _wake_state(self) -> dict:
         # A loaded, running detector is definitively ready; otherwise fall back
         # to the cheap on-disk model-file check (no Model construction).
-        ready = bool(self._wake_detector and self._wake_detector.ready) or wake_is_ready()
-        return {"enabled": self._wake_enabled, "awake": self._awake, "ready": ready}
+        det = self._wake_detector
+        ready = bool(det and det.ready) or wake_is_ready()
+        return {"enabled": self._wake_enabled, "awake": self._awake, "ready": ready,
+                "label": self._wake_label, "error": det.error if det else ""}
 
     def _ensure_wake_detector(self) -> bool:
-        """Load the detector once (model loads on first start). Idempotent."""
-        if self._wake_detector is None:
-            self._wake_detector = WakeWordDetector(
-                on_detect=self._on_wake_detected,
-                logger=lambda m: print(f"[Wake] {m}"),
-                notify=lambda m: self.ui.write_log(f"SYS: {m}"),
-            )
-        if not self._wake_detector.ready:
-            return self._wake_detector.start()
-        return True
+        """Load the detector once (model loads on first start). Idempotent.
+        Blocks while the model loads — call it through _start_wake_detector."""
+        with self._wake_lock:
+            if self._wake_detector is None:
+                self._wake_detector = WakeWordDetector(
+                    on_detect=self._on_wake_detected,
+                    settings=wake_settings(),
+                    logger=lambda m: print(f"[Wake] {m}"),
+                    notify=lambda m: self.ui.write_log(f"SYS: {m}"),
+                )
+            det = self._wake_detector
+            if det.ready:
+                return True
+            ok = det.start()
+            if ok:
+                # Whatever it may have heard before is not a reason to wake now.
+                det.arm()
+            return ok
 
-    def _on_wake_detected(self) -> None:
-        """Called from the detector thread when 'Hey Jarvis' is heard."""
-        self.wake(reason="wake word")
+    def _start_wake_detector(self) -> None:
+        """Load the detector on a worker thread. Loading a model takes up to a
+        second (several on the first run), and both the asyncio loop and the
+        Qt thread used to wait for it. Until it is up the assistant stays
+        asleep: wake-word mode never falls back to an open microphone."""
+        threading.Thread(target=self._ensure_wake_detector, daemon=True,
+                         name="wake-load").start()
+
+    def _reload_wake_detector(self) -> None:
+        """Settings changed: drop the running detector and load the new one.
+        Blocks while the model loads, so it runs on a worker thread."""
+        with self._wake_lock:
+            old, self._wake_detector = self._wake_detector, None
+        if old is not None:
+            old.stop()
+        self._wake_cfg = get_wake_settings()
+        self._wake_label = wake_phrase_label()
+        if self._wake_enabled and wake_is_ready():
+            self._ensure_wake_detector()
+
+    def _on_wake_detected(self, det: Detection) -> None:
+        """Called from the detector thread when the wake phrase is heard."""
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._wake_by_voice, det)
+        else:
+            self._wake_by_voice(det)
+
+    def _wake_by_voice(self, det: Detection) -> None:
+        """Event loop. Woken by the phrase: also hand the model what followed it."""
+        if not self._wake_enabled or self._awake:
+            return
+        if det.end_seq is not None:
+            back = int(round(_WAKE_REPLAY_BACK_S * SEND_SAMPLE_RATE / CHUNK_SIZE))
+            # Set before _awake: the audio thread reads _awake first.
+            self._wake_replay_from = det.end_seq - back + 1
+        self.wake(reason=f"heard '{det.label}'")
+        if self._wake_cfg.get("chime", True):
+            try:
+                self.ui.chime()
+            except Exception:
+                pass
+
+    def _take_wake_replay(self) -> list[bytes]:
+        """Audio thread, first block after waking: the blocks to send ahead of
+        it. Empty unless woken by voice; the ring is emptied either way."""
+        if not self._wake_ring:
+            return []
+        start = self._wake_replay_from
+        self._wake_replay_from = None
+        ring = list(self._wake_ring)
+        self._wake_ring.clear()
+        if start is None:
+            return []
+        return [b for s, b in ring if s >= start]
+
+    def _mic_asleep(self, indata) -> None:
+        """Audio thread, while asleep: remember the block and let the detector
+        hear it. Nothing is streamed."""
+        self._mic_seq += 1
+        self._wake_ring.append((self._mic_seq, indata.tobytes()))
+        det = self._wake_detector
+        if det is not None:
+            det.feed(indata, self._mic_seq)
 
     def wake(self, reason: str = "wake word") -> None:
         if self._awake:
             return
+        now = time.monotonic()
+        self._woke_at = now
+        self._last_user_speech = now   # start the auto-sleep clock now
+        self._sleep_requested = 0.0
         self._awake = True
-        self._last_user_speech = time.monotonic()   # start the auto-sleep clock now
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
@@ -722,22 +838,65 @@ class JarvisLive:
         if not self._awake:
             return
         self._awake = False
+        self._sleep_requested = 0.0
+        self._wake_replay_from = None
+        det = self._wake_detector
+        if det is not None:
+            det.arm(quiet_s=_WAKE_QUIET_S)
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
-        self.ui.write_log(f"SYS: Sleeping — {reason}. Say 'Hey Jarvis' to wake me.")
+        self.ui.write_log(f"SYS: Sleeping — {reason}. Say '{self._wake_label}' to wake me.")
+
+    def _sleep_due(self, now: float) -> str | None:
+        """Why the assistant should fall asleep now, or None to stay awake.
+
+        Never while it is talking, generating, running a tool or looking at
+        something, and never while push-to-talk is held. Otherwise it sleeps
+        once nothing has happened for the configured time — counted from the
+        last of: waking, the user's last words, the end of the last answer. In
+        follow-up mode that time is a few seconds, so the wake phrase is needed
+        again for each new request, with room for a follow-up question."""
+        if not self._wake_enabled or not self._awake:
+            return None
+        with self._speaking_lock:
+            speaking = self._is_speaking
+        q = self.audio_in_queue
+        if (speaking or self._generation_open() or self._vision_busy
+                or (self._ptt_enabled and self._ptt_held)
+                or (q is not None and not q.empty())):
+            return None
+        if self._sleep_requested:
+            # Normally done by the playback loop when the goodbye ends.
+            if now - self._sleep_requested > _SLEEP_REQUEST_MAX_S:
+                return "you asked me to"
+            return None
+        ref = max(self._last_user_speech, self._answer_ended_at, self._woke_at)
+        cfg = self._wake_cfg
+        if cfg.get("follow_up"):
+            limit = cfg.get("follow_up_seconds", 10)
+            if now - ref > limit:
+                return f"no follow-up for {limit} s"
+            return None
+        limit = cfg.get("sleep_timeout_seconds", 120)
+        if now - ref > limit:
+            return (f"no speech for {limit // 60} min" if limit % 60 == 0
+                    else f"no speech for {limit} s")
+        return None
 
     async def _run_sleep_watch(self) -> None:
         """Auto-sleep after the configured silence window (wake-word mode only)."""
         while True:
-            await asyncio.sleep(5)
-            if not self._wake_enabled or not self._awake:
-                continue
-            with self._speaking_lock:
-                speaking = self._is_speaking
-            if speaking:
-                continue
-            if (time.monotonic() - self._last_user_speech) > self._wake_sleep_timeout:
-                self.sleep(reason="no speech for 2 minutes")
+            await asyncio.sleep(1)
+            reason = self._sleep_due(time.monotonic())
+            if reason:
+                self.sleep(reason=reason)
+
+    def _on_answer_finished(self) -> None:
+        """Playback loop: the answer has been played out and nothing more of it
+        is coming."""
+        self._answer_ended_at = time.monotonic()
+        if self._sleep_requested and not self._generation_open():
+            self.sleep(reason="you asked me to")
 
     # ── Wake word: UI callbacks (called from the Qt thread) ──────────────────
 
@@ -749,7 +908,7 @@ class JarvisLive:
                 return "need_download"
             self._wake_enabled = True
             save_wake_word_enabled(True)
-            self._ensure_wake_detector()
+            self._start_wake_detector()
             self.sleep(reason="wake word enabled")
             return "enabled"
         else:
@@ -768,11 +927,25 @@ class JarvisLive:
             self.wake(reason="you tapped wake")
 
     def _ui_wake_install(self) -> tuple[bool, str]:
-        """Download openwakeword + the model (runs in a UI worker thread)."""
+        """Install the chosen engine and its model (runs in a UI worker thread)."""
         # Triggered by the user pressing the button, so its progress is exactly
         # what they are waiting to see.
         return wake_install(logger=lambda m: print(f"[Wake] {m}"),
                             notify=lambda m: self.ui.write_log(f"SYS: {m}"))
+
+    def _ui_wake_settings_changed(self) -> None:
+        """The wake-word settings panel saved new values (Qt thread)."""
+        def work():
+            self._reload_wake_detector()
+            if not self._wake_enabled:
+                return
+            det = self._wake_detector
+            if not wake_is_ready():
+                self.ui.write_log("SYS: Wake word — this engine is not installed yet; "
+                                  "press DOWNLOAD in the wake-word settings.")
+            elif det is not None and det.ready and not self._awake:
+                self.ui.write_log(f"SYS: Wake word — now say '{self._wake_label}'.")
+        threading.Thread(target=work, daemon=True, name="wake-reload").start()
 
     def plugin_say(self, instruction: str) -> None:
         """
@@ -866,9 +1039,9 @@ class JarvisLive:
             return
         # Respect wake-word sleep: a typed command must not be answered while
         # asleep either (the sleep gate is not just for the mic). Wake first with
-        # "Hey Jarvis" or the WAKE NOW button.
+        # the wake phrase or the WAKE NOW button.
         if self._wake_enabled and not self._awake:
-            self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
+            self.ui.write_log(f"SYS: I'm asleep — say '{self._wake_label}' or tap WAKE NOW first.")
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
@@ -957,8 +1130,10 @@ class JarvisLive:
             # Holding the key is also a way to wake it, so push-to-talk works
             # without having to say the wake word first.
             if self._wake_enabled and not self._awake:
+                self._wake_replay_from = None
+                self._woke_at = self._last_user_speech = time.monotonic()
+                self._sleep_requested = 0.0
                 self._awake = True
-                self._last_user_speech = time.monotonic()
         try:
             self.ui.set_state("LISTENING" if held else "SLEEPING")
         except Exception:
@@ -1107,6 +1282,7 @@ class JarvisLive:
                   for d in _all_decls}
         sys_prompt = _render_prompt(sys_prompt, {
             "assistant_name": self._asst_name,
+            "wake_phrase": self._wake_label,
             "platform": f"{_platform.system()} {_platform.release()}".strip(),
             "capabilities": _describe_tools(_all_decls),
             "limits": _describe_limits(
@@ -1317,6 +1493,18 @@ class JarvisLive:
                 else:
                     result = "Specify action (add/remove/list) and a topic."
 
+            elif name == "sleep_assistant":
+                if not self._wake_enabled:
+                    result = ("Sleep mode needs the wake word, and it is turned off. "
+                              "Tell the user it can be switched on under Controls → "
+                              "Wake word.")
+                else:
+                    # Asleep once this reply has been played out
+                    # (_on_answer_finished), so the goodbye is not cut off.
+                    self._sleep_requested = time.monotonic()
+                    result = (f"Going to sleep when this reply ends. Say a very short "
+                              f"goodbye; the user wakes you with '{self._wake_label}'.")
+
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
                 async def _do_shutdown():
@@ -1414,10 +1602,11 @@ class JarvisLive:
             # only a queue push, so the audio path is never slowed. When wake word
             # is off (default) or we're awake, this is a single boolean check.
             if self._wake_enabled and not self._awake:
-                det = self._wake_detector
-                if det is not None:
-                    det.feed(indata)
+                self._mic_asleep(indata)
                 return
+            # Just woken by voice: what was said after the wake phrase, so a
+            # command spoken in the same breath arrives whole.
+            wake_replay = self._take_wake_replay() if self._wake_ring else []
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
 
@@ -1484,7 +1673,7 @@ class JarvisLive:
                 return
             
             if not self.ui.muted and not self._phone_active:
-                for data in (*preroll, indata.tobytes()):
+                for data in (*wake_replay, *preroll, indata.tobytes()):
                     loop.call_soon_threadsafe(
                         self.out_queue.put_nowait,
                         {"data": data, "mime_type": "audio/pcm"}
@@ -1820,6 +2009,7 @@ class JarvisLive:
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
+                        self._on_answer_finished()
                     continue
 
                 # Interrupted while waiting: whatever the device still holds is
@@ -2315,12 +2505,19 @@ class JarvisLive:
                         self.ui.write_log("SYS: Reconnected — conversation restored.")
 
                     # Wake word: if enabled, come up ASLEEP (mic gated, silent)
-                    # until the user says "Hey Jarvis" or taps wake in the UI.
+                    # until the user says the wake phrase or taps wake in the UI.
+                    # The model loads on a worker thread; until then it simply
+                    # stays asleep.
                     if self._wake_enabled:
-                        self._ensure_wake_detector()
                         self._awake = False
+                        self._wake_replay_from = None
+                        if self._wake_detector is not None and self._wake_detector.ready:
+                            self._wake_detector.arm()
+                        else:
+                            self._start_wake_detector()
                         self.ui.set_state("SLEEPING")
-                        self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
+                        self.ui.write_log(f"SYS: {self._asst_name} online — sleeping. "
+                                          f"Say '{self._wake_label}' to wake me.")
                     else:
                         self._awake = True
                         self.ui.set_state("LISTENING")

@@ -11,7 +11,9 @@ How the running system fits together. The rules for writing code live in `AGENTS
 
 ## Audio path
 
-- `_listen_audio`: the microphone callback (sounddevice thread) computes a level, feeds the wake-word detector, and pushes blocks to `out_queue` only when the mic is open (awake, not muted, push-to-talk held if enabled, not speaking).
+- `_listen_audio`: the microphone callback (sounddevice thread) computes a level and pushes blocks to `out_queue` only when the mic is open (awake, not muted, push-to-talk held if enabled, not speaking).
+- While asleep (wake-word mode) nothing is streamed: `_mic_asleep` numbers each block, keeps the last ~6 s in `_wake_ring` and feeds `core.wake_word.WakeWordDetector`, which runs the chosen engine (`core/wake_engines/`: openWakeWord, sherpa-onnx or Vosk) on its own thread. A detection reports the block where the phrase ended; `_wake_by_voice` (on the loop via `call_soon_threadsafe`) wakes up, and the first awake block sends the ring from just before that point, so a command said in the same breath reaches the model whole.
+- Falling asleep (`sleep()`) re-arms the detector: its model is reset and the mic is ignored for 3 s, because the assistant's own last words woke it. `_sleep_due` decides auto-sleep (idle timeout, or the short follow-up window) and never fires mid-answer or mid-tool; the `sleep_assistant` tool sleeps once the goodbye has played (`_on_answer_finished`).
 - While the assistant speaks, mic blocks go to `core.barge_in.BargeIn` instead (when the opt-in "INTERRUPT BY VOICE" setting is on). `BargeIn` uses `core.echo.EchoGuard` per block and fires `_on_voice_barge_in` on the loop via `call_soon_threadsafe` after sustained evidence.
 - `_receive_audio` reads server messages: audio → `audio_in_queue`, transcripts → log and `core.viseme`, tool calls → `_execute_tool`, `interrupted` → interrupt bookkeeping.
 - `_play_audio` writes PCM to the output device, reports each block to `EchoGuard.note_output`, and drives the avatar's mouth from `_pcm_level` / `_pcm_visemes`.
