@@ -10,10 +10,11 @@ during that gap is how an assistant hears its own last sentence and answers
 itself. This module lets the tail drop our own voice while still passing a user
 who replies instantly, instead of blanket-muting.
 
-Interrupting mid-sentence by voice is the other thing it can do, and everything
-needed for it is here and tested — but it depends on the listener's room, so it
-stays switched off until it can be tried on real hardware. See the note in
-`_listen_audio` for how little it takes to turn back on.
+Interrupting mid-sentence by voice is the other use. `core.barge_in.BargeIn`
+asks this guard about every microphone block heard while JARVIS speaks and adds
+the sustained-evidence and cooldown rules a single block cannot know. It
+depends on the listener's room, so it is opt-in: the "INTERRUPT BY VOICE"
+setting, off by default.
 
 The problem with a level test
 -----------------------------

@@ -24,5 +24,4 @@ Upstream roadmap "LVI+" (interrupt by voice is done):
 ## Known issues
 
 - Voice barge-in is unverified on real hardware; thresholds may need tuning per room.
-- `core/echo.py` module docstring still says interrupting by voice "stays switched off"; it is now an opt-in setting.
 - `core/llm_client.py`, `core/stt.py`, `core/tts.py`, `core/installer.py` are unused legacy modules.
