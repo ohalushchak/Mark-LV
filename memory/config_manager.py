@@ -222,13 +222,15 @@ def save_voice_barge_in_mode(mode: str) -> None:
     _save_flag("voice_barge_in_mode", m if m in BARGE_IN_MODES else "voice")
 
 
-HUD_STYLES = ("face", "core")
+# In the order the settings button cycles through them.
+HUD_STYLES = ("face", "core", "orb", "anime")
 
 
 def get_hud_style() -> str:
-    """Which centrepiece the HUD draws: the animated head, or the reactor core.
+    """Which centrepiece the HUD draws: the animated head, the reactor core,
+    the wireframe orb, or the anime face.
 
-    Taste, not capability — both render in the same software painter and cost
+    Taste, not capability — all render in the same software painter and cost
     about the same. Defaults to the head because that is what MARK LIV shipped
     with; anyone who preferred the older look can switch back in ⚙ and the
     choice survives a restart.
@@ -240,6 +242,69 @@ def get_hud_style() -> str:
 def save_hud_style(style: str) -> None:
     s = str(style or "").strip().lower()
     _save_flag("hud_style", s if s in HUD_STYLES else "face")
+
+
+# Base palettes; the accent colour (ui_color) is applied on top of either.
+UI_THEMES = ("neon", "soft")
+
+
+def get_ui_theme() -> str:
+    """"neon" is the original near-black HUD; "soft" a slate, low-glare one."""
+    v = str(load_api_keys().get("ui_theme", "neon")).strip().lower()
+    return v if v in UI_THEMES else "neon"
+
+
+def save_ui_theme(theme: str) -> None:
+    t = str(theme or "").strip().lower()
+    _save_flag("ui_theme", t if t in UI_THEMES else "neon")
+
+
+def get_captions_enabled() -> bool:
+    """The latest exchange typed out under the HUD, large enough to read from
+    across the room. The activity log keeps the full history either way."""
+    return bool(load_api_keys().get("captions_enabled", True))
+
+
+def save_captions_enabled(enabled: bool) -> None:
+    _save_flag("captions_enabled", bool(enabled))
+
+
+# When the small orb at the top of the screen shows while the JARVIS window is
+# minimised or behind another app: never, only while it speaks, or all the time
+# (then it also shows listening, thinking and muted). In button order.
+DESKTOP_ORB_MODES = ("off", "speaking", "always")
+
+
+def get_desktop_orb_mode() -> str:
+    v = str(load_api_keys().get("desktop_orb_mode", "speaking")).strip().lower()
+    return v if v in DESKTOP_ORB_MODES else "speaking"
+
+
+def save_desktop_orb_mode(mode: str) -> None:
+    m = str(mode or "").strip().lower()
+    _save_flag("desktop_orb_mode", m if m in DESKTOP_ORB_MODES else "speaking")
+
+
+# Text size multipliers. Capped at 150 %: the HUD's buttons and rows have fixed
+# heights, and past that their labels start to clip.
+UI_SCALES = (1.0, 1.15, 1.3, 1.5)
+
+
+def get_ui_scale() -> float:
+    """Multiplier for every font in the interface; applied at startup."""
+    try:
+        v = float(load_api_keys().get("ui_scale", 1.0))
+    except (TypeError, ValueError):
+        v = 1.0
+    return min(UI_SCALES, key=lambda s: abs(s - v))
+
+
+def save_ui_scale(scale: float) -> None:
+    try:
+        v = float(scale)
+    except (TypeError, ValueError):
+        v = 1.0
+    _save_flag("ui_scale", min(UI_SCALES, key=lambda s: abs(s - v)))
 
 
 # ── Live-session tuning ──────────────────────────────────────────────────────

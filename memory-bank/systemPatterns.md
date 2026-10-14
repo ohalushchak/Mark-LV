@@ -21,6 +21,13 @@ How the running system fits together. The rules for writing code live in `AGENTS
 - `_play_audio` writes PCM to the output device, reports each block to `EchoGuard.note_output`, and drives the avatar's mouth from `_pcm_level` / `_pcm_visemes`.
 - `interrupt()` is the single interrupt path (UI button, "stop", a confirmed voice barge-in, interrupt-by-name): it drops queued and held audio, aborts the output stream, and discards the rest of the answer in flight.
 
+## HUD
+
+- `HudCanvas` steps its animation on a 16 ms timer and repaints at ~30 Hz while active, ~20 Hz idle, never while hidden. The centrepiece is `hud_style`: `face` (`core/avatar.py` HoloAvatar), `core` (reactor, `_paint_core`), `orb` (`core/orb_hud.py`) or `anime` (`core/anime_avatar.py`, a HoloAvatar subclass that only redraws). Each object is built once and kept, so the CONTROLS button cycles instantly and skips any style whose module failed to load (`can_show`). Renderers take colours as arguments and blend them opaquely onto `C.BG`.
+- Colours: `class C` holds the live palette. `apply_ui_theme` sets the base (`neon` / `soft`), then `apply_ui_accent` shifts the hue-linked keys, keeping each base colour's saturation and value. A live switch rewrites every widget stylesheet in one regex pass (`retheme_all_widgets`); tints mixed with `_mix_hex` and `MetricBar` colours are rebuilt or looked up by key, because they are not palette hex strings.
+- Fonts: every explicit font is `_font(size, weight)` — the per-OS `_MONO` face times `_UI_SCALE`, read once at import, so a TEXT SIZE change applies after a restart.
+- `ReplyCaption` (under the canvas) and `DesktopOrb` (parentless, always-on-top, click-through) both feed off what the HUD already has: the log lines on `_log_sig`, and the canvas's `speaking` / `muted` / `state` / `_amp_disp`. `DesktopOrb` steps only while it is wanted — the main window minimised or inactive, and its mode (`desktop_orb_mode`: off / speaking / always) asks for it now — and is woken by `_apply_state` and `changeEvent`; in "always" mode it idles at 20 fps.
+
 ## Tool dispatch
 
 `_execute_tool(fc)` routes by name: inline tools in `main.py` (`TOOL_DECLARATIONS`) → `ActionRegistry` (`actions/`) → `PluginRegistry` (`plugins/`). Action and plugin handlers run in the default executor, off the event loop. Results return as `FunctionResponse`; a tool's `scheduling` decides when a non-blocking result re-enters the conversation.

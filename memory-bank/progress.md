@@ -6,6 +6,7 @@ _Last updated: 2026-10-14_
 
 ## Done in this fork
 
+- HUD redesign, mixed from forks (tests in `tests/test_hud.py`): a wireframe orb style (`core/orb_hud.py`, from Kennycen) and an anime face style (`core/anime_avatar.py`, madshadowtest) beside the head and the reactor; a livelier head (state-driven smile, heavy lids when asleep, eye glow and gradient iris, lower teeth, breathing — madshadowtest); a soft slate theme preset (AcaneloL palette); a per-OS monospace font and one TEXT SIZE setting for all text (100–150 %); a bigger, theme-tinted mute button; captions of the latest exchange under the HUD (Nathan123y); a desktop orb when the window is out of sight, only while speaking or always (rilzisheree's idea). `JarvisUI.glance` now reaches the canvas — it referenced a missing attribute and silently did nothing.
 - `close_app` closes the named app (`actions/_app_closer.py`, tests in `tests/test_close_app.py`): found by process (open_app aliases) or window title, asked to close like its ✕ (WM_CLOSE / AppleScript quit / `wmctrl -c`), checked afterwards; reports missing admin rights or a save prompt instead of "Done"; never closes the assistant or the shell; undo reopens the app. It used to press Alt+F4 in whatever window had focus.
 - Screen capture takes the monitor under the mouse cursor, falling back to the primary (`_pick_monitor` in `actions/screen_processor.py`, tests in `tests/test_screen_capture.py`). It used to take `mss` monitor 1, which on a multi-monitor setup was a 1280×720 AV-receiver output instead of the 3440×1440 primary.
 - Voice barge-in, opt-in (`core/barge_in.py`, tests in `tests/test_barge_in.py`, `tests/test_interrupt_flow.py`, `tests/test_barge_pause.py`): settled-room and residual requirements, ~0.64 s of evidence, pause-and-confirm with resume, interrupt-by-name mode.
@@ -36,4 +37,8 @@ Fork backlog (deferred by the user, 2026-10-14):
 - Voice barge-in: background speech (a television, people in the room) still gets transcribed as words and confirms a pause; interrupt-by-name is the answer for such rooms. A short "stop" (< 0.64 s) no longer interrupts by voice.
 - Wake engines are verified only on Windows TTS speech, not a real microphone. Grammar-restricted Vosk can mistake similar words (an English test heard "market" as "marco"); two-word phrases are more reliable.
 - `close_app` on macOS and Linux is untested (no such machine here); on Linux it needs `wmctrl`. Closing an elevated window (Task Manager) is reported, not done, unless the assistant itself runs as administrator.
+- HUD redesign was tried live on Windows only (styles, themes, captions, desktop orb in both modes); macOS and Linux are untested, notably the translucent, click-through desktop orb window.
+- TEXT SIZE applies after a restart. At 150 % a few fixed-height spots are tight (the drop zone's second line touches its border, the command-input placeholder is cut).
+- A few neon-era tints are still fixed hex (`#002010`/`#001a08` active-button greens, camera backgrounds) and look slightly off on the soft theme.
+- The desktop orb also appears when the HUD is visible on another monitor but not the focused window; its mode can be set to off in CONTROLS.
 - Changing the wake phrase does not update the `{wake_phrase}` prompt line until the next reconnect.
