@@ -6,20 +6,20 @@ _Last updated: 2026-10-14_
 
 ## Current focus
 
-- The wake word is rebuilt around pluggable engines (`core/wake_engines/`) with a settings panel (⚙ SETUP → WAKE WORD SETUP, config block `wake_word`); merged into `main`. First real use worked (openWakeWord "Hey Jarvis", `sleep_assistant`); other engines are tested only on Windows TTS speech.
-- Voice barge-in fires on background sounds. A real session log showed both false interruptions early in the session, while the threshold still sat at its 0.15 floor, each on exactly the minimum 5-block (≈0.32 s) run; one discarded ≈14.5 s of a long answer. Later in the session the learned threshold rose to 0.27 and it stopped. Fix planned in a separate branch: longer calibration, more evidence, a pause-and-confirm interrupt that resumes on no words, and an "interrupt only by name" mode.
+- Voice barge-in robust to background sounds is merged into `main` and was tried live: false alarms pause and resume, and a server-cut answer is finished by the model without an audible seam.
+- Next: screen capture picks the wrong monitor on multi-display setups (see `progress.md` → Known issues).
 
 ## Recent decisions
 
-- Wake word, taken from the fork survey: openWakeWord stays the default ("Hey Jarvis"); sherpa-onnx gives a typed phrase without training (default "hey <assistant name>"); Vosk gives native Ukrainian words. Picovoice (no free tier), STT-text matching (CPU, false wakes) and prompt-only wake words were rejected.
-- What follows the wake phrase is replayed to the model from a ring of numbered mic blocks; the prompt (`{wake_phrase}`) says a turn may begin with the phrase.
-- After falling asleep the detector is reset and deaf for 3 s (own-voice false wakes); detections have a 2 s cooldown; openWakeWord needs 3 consecutive 80 ms frames.
-- Detector models load on worker threads; wake-word mode stays asleep (mic closed) if loading fails.
-- Barge-in builds on `EchoGuard`'s per-block judgement plus sustained evidence and a 2 s cooldown; interrupting aborts the output stream.
+- The misfires in the first real session log came from local barge-in, not the server: each on exactly the then-minimum 5 blocks (≈0.32 s), after ~8 s and ~12 s of the assistant talking — so the evidence length and the cost of a false trigger were the problem, not calibration time.
+- Barge-in needs a settled room (64 echo blocks ≈ 4 s), a residual ≥ 0.20 per block, and ~0.64 s of voice-like blocks within a window that tolerates 3 gaps.
+- A voice barge-in pauses and keeps the answer; words in the model's transcription confirm it, silence resumes it. The forwarded audio makes the server stop generating, so on resume the model is asked to finish (`_CONTINUE_TEXT`); live, this continued from the cut-off point.
+- "Interrupt by name" uses the wake detector while speaking and ignores its own name via EchoGuard verdicts. The UI button cycles OFF → BY VOICE → BY NAME (config `voice_barge_in_enabled`, `voice_barge_in_mode`).
+- Wake word: openWakeWord default; sherpa-onnx for typed phrases; Vosk for native Ukrainian; after sleeping the detector is reset and deaf for 3 s.
 - Agents commit only on the user's explicit request in the current message (`AGENTS.md` → *Commits*).
 
 ## Next steps
 
-- Make voice barge-in robust to background noise (see Current focus).
-- Try each wake engine on a real microphone, including a Ukrainian name on Vosk and on sherpa; tune default sensitivities if needed.
+- Fix the multi-monitor screen capture.
+- Try interrupt-by-name live, and each wake engine on a real microphone (a Ukrainian name on Vosk and on sherpa).
 - Pick the next feature from the upstream "LVI+" roadmap (see `progress.md`).

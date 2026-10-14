@@ -1,5 +1,5 @@
 """BargeIn on synthetic audio: our own echo must never interrupt, a second
-voice over it must, and only after sustained evidence."""
+voice over it must, and only after sustained evidence in a settled room."""
 
 import numpy as np
 import pytest
@@ -9,6 +9,7 @@ from core.echo import EchoGuard
 
 MIC_SR, OUT_SR, BLOCK = 16000, 24000, 1024
 DT = BLOCK / MIC_SR                     # 64 ms per microphone block
+CAL = 70                                # blocks of echo before the room is settled
 
 
 def _level(x) -> float:
@@ -67,9 +68,9 @@ def test_own_echo_never_interrupts():
 
 def test_voice_over_echo_interrupts_after_sustained_evidence():
     room = _Room()
-    for _ in range(40):                                    # calibrate on echo
+    for _ in range(CAL):                                   # calibrate on echo
         assert not room.step()
-    need = room.guard.required_blocks
+    need = room.barge.needed_blocks
     fired_at = next((i for i in range(40) if room.step(user=True)), None)
     assert fired_at is not None, "a distinct voice over the echo was never heard"
     assert fired_at >= need - 1, "fired before the guard's required evidence"
@@ -77,7 +78,7 @@ def test_voice_over_echo_interrupts_after_sustained_evidence():
 
 def test_short_noise_burst_does_not_interrupt():
     room = _Room()
-    for _ in range(40):
+    for _ in range(CAL):
         room.step()
     for _ in range(3):
         for _ in range(2):                                 # a 128 ms cough
@@ -88,7 +89,7 @@ def test_short_noise_burst_does_not_interrupt():
 
 def test_fires_once_and_hands_back_the_speech():
     room = _Room()
-    for _ in range(40):
+    for _ in range(CAL):
         room.step()
     fired = [room.step(user=True) for _ in range(30)]
     assert fired.count(True) == 1
@@ -96,7 +97,7 @@ def test_fires_once_and_hands_back_the_speech():
     audio = room.barge.take_audio()
     # Everything since the run began, plus the pre-roll, at 2 bytes a sample.
     blocks = len(audio) // (BLOCK * 2)
-    assert blocks >= room.guard.required_blocks + 1
+    assert blocks >= room.barge.needed_blocks + 1
     assert room.barge.handed_off
     assert room.barge.take_audio() == b""                  # only once
     assert not room.step(user=True)                        # done until reset
@@ -104,7 +105,7 @@ def test_fires_once_and_hands_back_the_speech():
 
 def test_cooldown_survives_reset():
     room = _Room()
-    for _ in range(40):
+    for _ in range(CAL):
         room.step()
     assert any(room.step(user=True) for _ in range(30))
     room.barge.take_audio()
@@ -140,5 +141,68 @@ def test_guard_error_means_no_interrupt():
 def test_works_across_echo_levels(gain):
     """Headphones (no echo), a quiet laptop, loud desktop speakers."""
     room = _Room(echo_gain=gain)
-    assert not any(room.step() for _ in range(60))
+    assert not any(room.step() for _ in range(CAL))
     assert any(room.step(user=True) for _ in range(40))
+
+
+def test_a_half_second_burst_does_not_interrupt():
+    """The case from a real session: 0.45 s (7 blocks) of something that is
+    not our echo, which the old 5-block rule took for an interruption."""
+    room = _Room()
+    for _ in range(CAL):
+        room.step()
+    for _ in range(3):
+        assert not any(room.step(user=True) for _ in range(7))
+        for _ in range(8):
+            assert not room.step()
+
+
+def test_pauses_between_words_do_not_reset_the_evidence():
+    room = _Room()
+    for _ in range(CAL):
+        room.step()
+    pattern = ([True] * 4 + [False]) * 4          # four words, short gaps
+    assert any(room.step(user=u) for u in pattern)
+
+
+def test_nothing_interrupts_before_the_room_is_settled():
+    room = _Room()
+    for _ in range(20):                           # ~1.3 s of echo only
+        room.step()
+    assert not any(room.step(user=True) for _ in range(20))
+
+
+class _Guard:
+    """Says 'voice' for every block, with a chosen residual."""
+    required_blocks = 5
+
+    def __init__(self, residual=0.5, echo_blocks=1000):
+        self.last_residual = residual
+        self.echo_blocks = echo_blocks
+
+    def is_user_speech(self, *a, **k):
+        return True
+
+
+def _blk():
+    return np.zeros(BLOCK, dtype=np.int16)
+
+
+def test_a_residual_just_above_the_guard_floor_is_not_enough():
+    weak = BargeIn(_Guard(residual=0.17), MIC_SR, BLOCK)
+    assert not any(weak.feed(_blk(), 0.5, now=i * DT) for i in range(30))
+    strong = BargeIn(_Guard(residual=0.30), MIC_SR, BLOCK)
+    assert any(strong.feed(_blk(), 0.5, now=i * DT) for i in range(30))
+
+
+def test_needs_about_two_thirds_of_a_second():
+    b = BargeIn(_Guard(), MIC_SR, BLOCK)
+    fired = next(i for i in range(30) if b.feed(_blk(), 0.5, now=i * DT))
+    assert (fired + 1) * DT >= 0.6
+
+
+def test_hold_off_after_a_false_alarm():
+    b = BargeIn(_Guard(), MIC_SR, BLOCK, cooldown_s=0.0)
+    b.hold_off(3.0, now=0.0)
+    assert not any(b.feed(_blk(), 0.5, now=i * DT) for i in range(40))   # 2.5 s
+    assert any(b.feed(_blk(), 0.5, now=3.0 + i * DT) for i in range(5))

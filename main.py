@@ -73,7 +73,7 @@ from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
-    get_voice_barge_in_enabled, get_wake_settings,
+    get_voice_barge_in_enabled, get_voice_barge_in_mode, get_wake_settings,
 )
 from core                     import gemini as _gemini
 from core.plugin_loader        import discover_plugins
@@ -108,6 +108,40 @@ _WAKE_QUIET_S = 3.0
 # "Go to sleep" waits for the goodbye to finish playing. If no turn end ever
 # arrives, sleep anyway after this long.
 _SLEEP_REQUEST_MAX_S = 15.0
+
+# Voice barge-in pauses the answer instead of discarding it, and waits this
+# long for the model to transcribe actual words before resuming. While the
+# microphone is still loud the wait is extended, up to the second figure.
+_BARGE_CONFIRM_S = 1.5
+_BARGE_CONFIRM_MAX_S = 3.0
+# Mic level above which the user may still be talking (see _pcm_level).
+_BARGE_LOUD = 0.08
+# After a false alarm, whatever set it off is probably still making noise:
+# nothing may pause the answer again for this long.
+_BARGE_FALSE_HOLD_S = 6.0
+# The audio forwarded to check for words makes the server's VAD stop the answer
+# it was still generating — so a resumed answer used to end mid-word (seen on
+# both false alarms of a real session). When that happens the model is asked to
+# finish. It knows where it stopped, because it generated exactly what is played.
+_CONTINUE_TEXT = (
+    "[SYSTEM] What interrupted you was background noise, not the user. "
+    "Continue your previous answer from the exact word where it was cut off. "
+    "Do not repeat anything already said, and do not mention the interruption.")
+# The server's interruption notice can arrive just after a resume; within this
+# window it is handled the same way instead of discarding the resumed answer.
+_BARGE_GRACE_S = 3.0
+# Interrupt-by-name: around the end of the detected phrase, at least this share
+# of microphone blocks must be the user's voice rather than our own echo — the
+# assistant saying its own name must not stop it.
+_NAME_USER_SHARE = 0.5
+_NAME_CHECK_BLOCKS = 8
+
+
+def _has_words(text: str) -> bool:
+    """True if a transcript holds actual words, not just a noise tag such
+    as '<noise>' or '[music]' or stray punctuation."""
+    t = re.sub(r"[\[<(][^\]>)]*[\]>)]", " ", text or "")
+    return sum(ch.isalpha() for ch in t) >= 2
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -614,7 +648,20 @@ class JarvisLive:
         # Interrupting by voice: off unless the user turns it on. See
         # core/barge_in.py and the barge-in branch of _listen_audio.
         self._barge_enabled        = get_voice_barge_in_enabled()
+        self._barge_mode           = get_voice_barge_in_mode()   # "voice" | "name"
         self._barge                = BargeIn(self._echo, SEND_SAMPLE_RATE, CHUNK_SIZE)
+        # A voice barge-in pauses the answer until the model confirms words.
+        # While paused, this holds the audio to resume with (None = not paused).
+        self._barge_hold: list[bytes] | None = None
+        self._barge_token          = 0       # invalidates stale confirmation timers
+        self._barge_since          = 0.0     # when the pause began
+        self._barge_server_cut     = False   # the server stopped generating meanwhile
+        self._barge_gen_open       = False   # the answer was still being generated
+        self._barge_grace_until    = 0.0     # a late server interruption still counts as the pause's
+        self._continue_requested   = False   # asked the model to finish the cut answer
+        self._pause_capture        = False   # playback must save what it had not played
+        self._written_tail         = bytearray()  # last ~1 s handed to the device
+        self._last_loud            = 0.0     # last time the open mic heard a voice-level sound
         self._tail_preroll: deque  = deque(maxlen=_TAIL_PREROLL_BLOCKS)
         # `stream.write()` returns when the buffer accepts the audio, not when the
         # speaker has finished with it, so sound is still in the room after the
@@ -701,8 +748,9 @@ class JarvisLive:
         self._wake_lock        = threading.Lock()   # one detector load at a time
         self._wake_cfg         = get_wake_settings()  # timing and chime
         self._wake_label       = wake_phrase_label()  # "Hey Jarvis", or the user's phrase
-        # Microphone blocks heard while asleep, numbered so a detection can say
-        # where the phrase ended. Written by the audio thread only.
+        # Microphone blocks heard while asleep (or, in interrupt-by-name mode,
+        # while speaking), numbered so a detection can say where the phrase
+        # ended: (seq, pcm bytes, judged the user's voice). Audio thread only.
         self._wake_ring: deque = deque(maxlen=_WAKE_RING_BLOCKS)
         self._mic_seq          = 0
         # Set by a voice wake: the first block number to hand to the model.
@@ -757,6 +805,10 @@ class JarvisLive:
                 det.arm()
             return ok
 
+    def _wants_wake_detector(self) -> bool:
+        """The detector serves sleep mode and interrupt-by-name."""
+        return self._wake_enabled or (self._barge_enabled and self._barge_mode == "name")
+
     def _start_wake_detector(self) -> None:
         """Load the detector on a worker thread. Loading a model takes up to a
         second (several on the first run), and both the asyncio loop and the
@@ -774,14 +826,22 @@ class JarvisLive:
             old.stop()
         self._wake_cfg = get_wake_settings()
         self._wake_label = wake_phrase_label()
-        if self._wake_enabled and wake_is_ready():
+        if self._wants_wake_detector() and wake_is_ready():
             self._ensure_wake_detector()
 
     def _on_wake_detected(self, det: Detection) -> None:
         """Called from the detector thread when the wake phrase is heard."""
         loop = self._loop
         if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(self._wake_by_voice, det)
+            loop.call_soon_threadsafe(self._on_wake_phrase, det)
+        else:
+            self._on_wake_phrase(det)
+
+    def _on_wake_phrase(self, det: Detection) -> None:
+        """Event loop: asleep, the phrase wakes it; while it is talking in
+        interrupt-by-name mode, the phrase stops it."""
+        if self._awake:
+            self._name_barge_in(det)
         else:
             self._wake_by_voice(det)
 
@@ -811,13 +871,13 @@ class JarvisLive:
         self._wake_ring.clear()
         if start is None:
             return []
-        return [b for s, b in ring if s >= start]
+        return [b for s, b, _mine in ring if s >= start]
 
     def _mic_asleep(self, indata) -> None:
         """Audio thread, while asleep: remember the block and let the detector
         hear it. Nothing is streamed."""
         self._mic_seq += 1
-        self._wake_ring.append((self._mic_seq, indata.tobytes()))
+        self._wake_ring.append((self._mic_seq, indata.tobytes(), True))
         det = self._wake_detector
         if det is not None:
             det.feed(indata, self._mic_seq)
@@ -862,6 +922,7 @@ class JarvisLive:
             speaking = self._is_speaking
         q = self.audio_in_queue
         if (speaking or self._generation_open() or self._vision_busy
+                or self._barge_hold is not None
                 or (self._ptt_enabled and self._ptt_held)
                 or (q is not None and not q.empty())):
             return None
@@ -1064,6 +1125,8 @@ class JarvisLive:
             if not was:
                 # A new stretch of speech: barge-in judges it from scratch.
                 self._barge.reset()
+                if self._barge_mode == "name" and self._wake_detector is not None:
+                    self._wake_detector.arm()
         else:
             # Hold the guard open across what the device still has to play plus
             # a margin for the room. The microphone is NOT muted during it — the
@@ -1139,10 +1202,22 @@ class JarvisLive:
         except Exception:
             pass
 
-    def set_barge_in(self, enabled: bool) -> None:
-        """Turn interrupting by voice on or off (from the settings panel)."""
+    def set_barge_in(self, enabled: bool, mode: str | None = None) -> str:
+        """Turn interrupting by voice on or off and pick what may interrupt
+        (from the settings panel). Returns a line for the activity log."""
         self._barge_enabled = bool(enabled)
+        if mode in ("voice", "name"):
+            self._barge_mode = mode
         self._barge.reset()
+        if not self._barge_enabled:
+            return "Interrupt by voice off."
+        if self._barge_mode == "voice":
+            return "Interrupt by voice on — talk over JARVIS to stop it."
+        if not wake_is_ready():
+            return ("Interrupt by name needs a wake-word engine — set one up in "
+                    "WAKE WORD SETUP first.")
+        self._start_wake_detector()
+        return f"Interrupt by name on — say '{self._wake_label}' to stop it."
 
     def _generation_open(self) -> bool:
         """True if the server may still be sending audio for the current answer."""
@@ -1159,6 +1234,10 @@ class JarvisLive:
         # answer is coming, and a flag set now would only be cleared by the NEXT
         # turn_complete: the whole next reply would be thrown away unheard.
         self._interrupted = self._generation_open()
+        # A paused voice barge-in is settled now: nothing will be resumed.
+        self._barge_hold = None
+        self._pause_capture = False
+        self._barge_token += 1
         # Tell the playback loop to drop what the output device has buffered.
         self._play_gen += 1
         q = self.audio_in_queue
@@ -1198,8 +1277,12 @@ class JarvisLive:
         g = self._echo
         print(f"[JARVIS] 🗣 Barge-in by voice — {len(audio) // 2 / SEND_SAMPLE_RATE:.2f}s "
               f"of speech (threshold {g.threshold:.2f}, "
-              f"{'reliable' if g.reliable else 'noisy room'})")
-        self.interrupt(by_voice=True)
+              f"{'reliable' if g.reliable else 'noisy room'}) — paused, waiting for words")
+        # Paused, not discarded: a door or a television can get this far, and
+        # discarding cost one real session 14 s of a long answer. The model
+        # decides — if it transcribes words the interruption stands, if not
+        # the answer carries on from where it stopped.
+        self._pause_for_barge_in()
         # Hand the model what was said so far, so the user does not have to
         # repeat it. Server VAD is on, so this is plain audio: explicit
         # activity_start/activity_end markers are rejected in that mode.
@@ -1210,6 +1293,144 @@ class JarvisLive:
                     {"data": audio[i:i + step], "mime_type": "audio/pcm"})
             except Exception:
                 break
+
+    def _pause_for_barge_in(self) -> None:
+        """Event loop: stop the sound now, keep everything not yet heard."""
+        q = self.audio_in_queue
+        held: list[bytes] = []
+        while q is not None:
+            try:
+                held.append(q.get_nowait())
+            except Exception:
+                break
+        self._barge_hold = held
+        self._barge_token += 1
+        self._barge_since = time.monotonic()
+        self._barge_server_cut = False
+        self._barge_gen_open = self._generation_open()
+        self._continue_requested = False
+        self._barge_grace_until = 0.0
+        # The playback loop flushes the device and, before it does, puts back
+        # in front what the device was still holding unplayed.
+        self._pause_capture = True
+        self._play_gen += 1
+        self.set_speaking(False)
+        self._tail_until = 0.0          # the user is talking: hold nothing back
+        self._tail_preroll.clear()
+        self._visemes.reset()
+        self.ui.write_log("SYS: Paused — listening...")
+        loop = self._loop
+        if loop is not None:
+            loop.call_later(_BARGE_CONFIRM_S, self._barge_check, self._barge_token)
+
+    def _barge_check(self, token: int) -> None:
+        """Event loop: no words yet. Wait while the mic is still loud, then
+        resume."""
+        if token != self._barge_token or self._barge_hold is None:
+            return
+        now = time.monotonic()
+        if (now - self._last_loud < 0.3
+                and now - self._barge_since < _BARGE_CONFIRM_MAX_S
+                and self._loop is not None):
+            self._loop.call_later(0.25, self._barge_check, token)
+            return
+        self._resume_after_barge()
+
+    def _commit_barge_in(self, why: str) -> None:
+        """Event loop: the pause was a real interruption — drop the answer."""
+        if self._barge_hold is None:
+            return
+        print(f"[JARVIS] 🗣 Barge-in confirmed ({why})")
+        self.interrupt(by_voice=True)
+
+    def _resume_after_barge(self) -> None:
+        """Event loop: no words came — carry on with the answer."""
+        held = self._barge_hold
+        if held is None:
+            return
+        self._barge_hold = None
+        self._barge_token += 1
+        self._pause_capture = False
+        q = self.audio_in_queue
+        later: list[bytes] = []
+        while q is not None:
+            try:
+                later.append(q.get_nowait())
+            except Exception:
+                break
+        if q is not None:
+            for chunk in (*held, *later):
+                q.put_nowait(chunk)
+        self._barge.hold_off(_BARGE_FALSE_HOLD_S)
+        self._barge_grace_until = time.monotonic() + _BARGE_GRACE_S
+        cut = self._barge_server_cut and self._barge_gen_open
+        print("[JARVIS] 🗣 Barge-in: no words heard — resuming"
+              + (" (the server had already stopped the answer)" if cut else ""))
+        if cut:
+            self._request_continuation()
+        self.ui.write_log("SYS: No words heard — carrying on."
+                          if (held or later) else "SYS: No words heard.")
+        if not (held or later) and not self._generation_open() and self._turn_done_event:
+            # Nothing left to play: the answer had in fact ended, and the
+            # playback loop should close it as usual.
+            self._turn_done_event.set()
+
+    def _request_continuation(self) -> None:
+        """Event loop: ask the model to finish an answer the server cut off
+        during a false alarm. Its reply queues behind what is still held, so
+        it follows on without a seam. Once per pause."""
+        if self._continue_requested:
+            return
+        self._continue_requested = True
+        session, loop = self.session, self._loop
+        if session is None or loop is None:
+            return
+
+        async def _go():
+            try:
+                await session.send_client_content(
+                    turns={"role": "user", "parts": [{"text": _CONTINUE_TEXT}]},
+                    turn_complete=True,
+                )
+            except Exception as e:
+                print(f"[JARVIS] ⚠️  Could not ask to continue: {e}")
+
+        loop.create_task(_go())
+        print("[JARVIS] 🗣 Asked the model to finish the cut-off answer")
+
+    def _mic_name_watch(self, indata) -> None:
+        """Audio thread, while speaking in interrupt-by-name mode: let the
+        wake detector listen, and remember which blocks were the user's voice
+        rather than our echo."""
+        try:
+            mine = bool(self._echo.is_user_speech(indata, SEND_SAMPLE_RATE,
+                                                  _pcm_level(indata)))
+        except Exception:
+            mine = False
+        self._mic_seq += 1
+        self._wake_ring.append((self._mic_seq, indata.tobytes(), mine))
+        det = self._wake_detector
+        if det is not None:
+            det.feed(indata, self._mic_seq)
+
+    def _name_barge_in(self, det: Detection) -> None:
+        """Event loop: the wake phrase was heard while speaking (name mode)."""
+        with self._speaking_lock:
+            speaking = self._is_speaking
+        if not (speaking and self._barge_enabled and self._barge_mode == "name"):
+            return
+        if det.end_seq is not None:
+            near = [u for s, _b, u in list(self._wake_ring)
+                    if det.end_seq - _NAME_CHECK_BLOCKS < s <= det.end_seq]
+            if near and sum(near) / len(near) < _NAME_USER_SHARE:
+                # Mostly our own voice: the assistant said its own name.
+                print(f"[JARVIS] 🗣 Name heard in our own speech — ignored "
+                      f"({sum(near)}/{len(near)} blocks were the user)")
+                return
+            back = int(round(_WAKE_REPLAY_BACK_S * SEND_SAMPLE_RATE / CHUNK_SIZE))
+            self._wake_replay_from = det.end_seq - back + 1
+        print(f"[JARVIS] 🗣 Interrupted by name ('{det.label}')")
+        self.interrupt(by_voice=True)
 
     def speak(self, text: str):
         if not self._loop or not self.session:
@@ -1633,7 +1854,9 @@ class JarvisLive:
                             and not self._phone_active
                             and not (self._ptt_enabled and not self._ptt_held)):
                         try:
-                            if self._barge.feed(indata, _pcm_level(indata)):
+                            if self._barge_mode == "name":
+                                self._mic_name_watch(indata)
+                            elif self._barge.feed(indata, _pcm_level(indata)):
                                 loop.call_soon_threadsafe(self._on_voice_barge_in)
                         except Exception:
                             pass
@@ -1682,7 +1905,10 @@ class JarvisLive:
                 # the user's actual voice while listening. Purely cosmetic — any
                 # failure here must never disturb the mic.
                 try:
-                    self.ui.set_audio_level(_pcm_level(indata))
+                    lvl = _pcm_level(indata)
+                    if lvl >= _BARGE_LOUD:
+                        self._last_loud = time.monotonic()
+                    self.ui.set_audio_level(lvl)
                 except Exception:
                     pass
 
@@ -1793,6 +2019,11 @@ class JarvisLive:
                             self._resume_handle = _sru.new_handle
 
                     if response.data:
+                        if self._barge_hold is not None and self._barge_server_cut:
+                            # The server stopped the old answer and is now
+                            # sending a new one: it took the user's words as
+                            # a turn, which settles the pause.
+                            self._commit_barge_in("the model is replying")
                         self._gen_active = True
                         if self._interrupted:
                             pass  # discard: interrupted
@@ -1818,13 +2049,30 @@ class JarvisLive:
                             self._gen_active = False
                             self._tool_turn_open = self._tool_responded = False
                             self._interrupted = False
-                            with self._speaking_lock:
-                                speaking = self._is_speaking
-                            if speaking or not self.audio_in_queue.empty():
-                                self.interrupt(by_voice=True)
-                            print("[JARVIS] ✋ Server reports interruption")
-                            out_buf = []
-                            self._visemes.reset()
+                            if self._barge_hold is not None:
+                                # Our own pause is waiting for words. The
+                                # server's VAD fires on noise too (it did on
+                                # both false alarms in the session log), so
+                                # this alone settles nothing; what was already
+                                # received may still be resumed.
+                                self._barge_server_cut = True
+                                print("[JARVIS] ✋ Server reports interruption (paused, waiting for words)")
+                            elif time.monotonic() < self._barge_grace_until:
+                                # The same noise, reported after we resumed:
+                                # keep playing what we have, and have the
+                                # model finish what it never generated.
+                                self._barge_server_cut = True
+                                print("[JARVIS] ✋ Server reports interruption (just resumed — keeping the answer)")
+                                if self._barge_gen_open:
+                                    self._request_continuation()
+                            else:
+                                with self._speaking_lock:
+                                    speaking = self._is_speaking
+                                if speaking or not self.audio_in_queue.empty():
+                                    self.interrupt(by_voice=True)
+                                print("[JARVIS] ✋ Server reports interruption")
+                                out_buf = []
+                                self._visemes.reset()
 
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
@@ -1848,6 +2096,8 @@ class JarvisLive:
                             if txt:
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
+                                if self._barge_hold is not None and _has_words(txt):
+                                    self._commit_barge_in(f"heard: {txt[:40]!r}")
 
                         if sc.turn_complete:
                             if self._turn_done_event:
@@ -1982,6 +2232,17 @@ class JarvisLive:
         async def _flush_device() -> None:
             nonlocal seen_gen
             seen_gen = self._play_gen
+            if self._pause_capture:
+                # A voice barge-in paused the answer. What the device still
+                # holds has not been heard yet: put it back in front of the
+                # held audio, so resuming repeats nothing and skips nothing.
+                self._pause_capture = False
+                left = self._play_cursor - time.time() if self._play_cursor else 0.0
+                n = min(len(self._written_tail), max(0, int(left * RECEIVE_SAMPLE_RATE)) * 2)
+                if n and self._barge_hold is not None:
+                    self._barge_hold.insert(0, bytes(self._written_tail[-n:]))
+            self._written_tail.clear()
+            self._play_cursor = 0.0
             try:
                 await asyncio.to_thread(stream.abort)
             except Exception:
@@ -1996,6 +2257,11 @@ class JarvisLive:
             while True:
                 if self._play_gen != seen_gen:
                     await _flush_device()
+                if self._barge_hold is not None:
+                    # Paused for a barge-in: nothing plays, and the end of the
+                    # answer must not be declared while it is only on hold.
+                    await asyncio.sleep(0.02)
+                    continue
                 try:
                     chunk = await asyncio.wait_for(
                         self.audio_in_queue.get(),
@@ -2006,10 +2272,16 @@ class JarvisLive:
                         self._turn_done_event
                         and self._turn_done_event.is_set()
                         and self.audio_in_queue.empty()
+                        and self._barge_hold is None
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
                         self._on_answer_finished()
+                    continue
+
+                if self._barge_hold is not None:
+                    # Paused while waiting: this belongs after what is held.
+                    self._barge_hold.append(chunk)
                     continue
 
                 # Interrupted while waiting: whatever the device still holds is
@@ -2079,6 +2351,10 @@ class JarvisLive:
                 except Exception:
                     pass
 
+                # Kept so a pause can put back what the device never played.
+                self._written_tail.extend(batch)
+                if len(self._written_tail) > RECEIVE_SAMPLE_RATE * 2:
+                    del self._written_tail[:-RECEIVE_SAMPLE_RATE * 2]
                 write_gen = self._play_gen
                 try:
                     await asyncio.to_thread(stream.write, bytes(batch))
@@ -2520,6 +2796,9 @@ class JarvisLive:
                                           f"Say '{self._wake_label}' to wake me.")
                     else:
                         self._awake = True
+                        if self._wants_wake_detector() and wake_is_ready() and not (
+                                self._wake_detector and self._wake_detector.ready):
+                            self._start_wake_detector()     # interrupt-by-name
                         self.ui.set_state("LISTENING")
                         self.ui.write_log("SYS: JARVIS online.")
 

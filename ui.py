@@ -3316,7 +3316,7 @@ class MainWindow(QMainWindow):
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
-        self.on_barge_in       = None   # callable: (enable: bool) -> None — voice interrupt
+        self.on_barge_in       = None   # callable: (enable: bool, mode: str) -> str — voice interrupt
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self.wake_get_state    = None   # callable: () -> dict {enabled, awake, ready}
         self.on_wake_settings  = None   # callable: () -> None — wake settings saved
@@ -5472,17 +5472,22 @@ class MainWindow(QMainWindow):
             else "Hold a key to talk instead of streaming the mic continuously.")
 
         if hasattr(self, "_barge_btn"):
-            from memory.config_manager import get_voice_barge_in_enabled
+            from memory.config_manager import (get_voice_barge_in_enabled,
+                                               get_voice_barge_in_mode)
             barge = get_voice_barge_in_enabled()
-            self._barge_btn.setText("🗣  INTERRUPT BY VOICE: ON" if barge
-                                    else "🗣  INTERRUPT BY VOICE: OFF")
+            by_name = get_voice_barge_in_mode() == "name"
+            self._barge_btn.setText(
+                "🗣  INTERRUPT: OFF" if not barge
+                else "🗣  INTERRUPT: BY NAME" if by_name
+                else "🗣  INTERRUPT: BY VOICE")
             self._barge_btn.setStyleSheet(_on if barge else _off)
             self._barge_btn.setToolTip(
-                "Start talking while JARVIS speaks and it stops to listen. Its own "
-                "voice from the speakers is told apart from yours; headphones make "
-                "that easiest." if barge
-                else "Let talking over JARVIS interrupt it. Experimental: how well "
-                     "it works depends on your room, speakers and microphone.")
+                "Talk over JARVIS and it pauses to listen; if no words are heard, "
+                "it carries on. Click for name-only." if barge and not by_name
+                else "Only the wake phrase stops JARVIS mid-answer — a television "
+                     "or a door cannot. Click to turn off." if barge
+                else "Let talking over JARVIS interrupt it. Click to cycle: by "
+                     "voice, by name only, off.")
 
 
     def _refresh_hud_btn(self):
@@ -5538,21 +5543,31 @@ class MainWindow(QMainWindow):
         self._refresh_talk_btns()
 
     def _toggle_barge_in(self):
-        from memory.config_manager import (get_voice_barge_in_enabled,
-                                           save_voice_barge_in_enabled)
-        want = not get_voice_barge_in_enabled()
-        save_voice_barge_in_enabled(want)
+        """Cycle: off → by voice → by name only → off."""
+        from memory.config_manager import (
+            get_voice_barge_in_enabled, get_voice_barge_in_mode,
+            save_voice_barge_in_enabled, save_voice_barge_in_mode,
+        )
+        on, mode = get_voice_barge_in_enabled(), get_voice_barge_in_mode()
+        if not on:
+            on, mode = True, "voice"
+        elif mode == "voice":
+            mode = "name"
+        else:
+            on, mode = False, "voice"
+        save_voice_barge_in_enabled(on)
+        save_voice_barge_in_mode(mode)
+        msg = ("Interrupt by voice off." if not on
+               else f"Interrupt {'by name' if mode == 'name' else 'by voice'} on.")
         if self.on_barge_in:
             try:
-                self.on_barge_in(want)
+                msg = self.on_barge_in(on, mode) or msg
             except Exception as e:
                 self._log.append_log(f"ERR: Voice interrupt failed — {e}")
                 save_voice_barge_in_enabled(False)
-                want = False
+                msg = "Interrupt by voice off."
         self._refresh_talk_btns()
-        self._log.append_log(
-            "SYS: Interrupt by voice on — talk over JARVIS to stop it." if want
-            else "SYS: Interrupt by voice off.")
+        self._log.append_log(f"SYS: {msg}")
 
     def _apply_ptt_shortcut(self, needed: bool):
         """Bind the chord inside the window when no global hook is available.
