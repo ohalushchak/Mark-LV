@@ -244,9 +244,15 @@ def brightness_down():
         except Exception as e:
             print(f"[Settings] Brightness down failed on Windows: {e}")
 
-def close_app():
-    if _OS == "Darwin": pyautogui.hotkey("command", "q")
-    else:               pyautogui.hotkey("alt", "f4")
+def close_app(name: str = "") -> str:
+    """Close an app by name, or the one in front; see actions/_app_closer.py.
+    This used to press Alt+F4 / Cmd+Q in whatever window had focus and report
+    success either way."""
+    from actions._app_closer import close_app as _close, describe, reopen
+    msg, closed = _close(name)
+    if closed and any(w.path for w in closed):
+        push_undo(f"closed {describe(closed)}", lambda c=closed: reopen(c))
+    return msg
 
 def close_window():
     if _OS == "Darwin": pyautogui.hotkey("command", "w")
@@ -752,7 +758,14 @@ def _detect_action(description: str) -> dict:
     if num and any(w in low for w in ("volume", "ses", "sound", "lautstark", "громкость")):
         return {"action": "volume_set", "value": max(0, min(100, int(num.group(1))))}
 
-    # 3. Alias phrases.
+    # 3. "close chrome", "quit task manager" — closing an app by name. Not
+    #    "close this", "close the tab": those act on what is in front.
+    m = re.match(r"^(?:close|quit|exit|закрий|закрити)\s+(?:the\s+)?(.+)$", low)
+    if m and m.group(1).strip() not in ("this", "it", "tab", "window", "the tab",
+                                        "the window", "this tab", "this window"):
+        return {"action": "close_app", "value": m.group(1).strip()}
+
+    # 3b. Alias phrases.
     for action, phrases in _ALIASES.items():
         if any(_normalise(p) == norm or p in low for p in phrases):
             return {"action": action, "value": None}
@@ -862,6 +875,10 @@ def computer_settings(
         except Exception as e:
             return f"Reload failed: {e}"
 
+    if action in ("close_app", "quit_app", "close_application"):
+        name = str(value or params.get("app", "") or "").strip()
+        return close_app(name)
+
     if action == "scroll_up":
         scroll_up(int(value or 500))
         return "Scrolled up."
@@ -911,7 +928,7 @@ def computer_settings(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "computer_settings",
-    "description": "Controls the computer: volume, brightness, window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. restart, shutdown and toggle_wifi put a confirmation on the user's screen and do NOT happen until they press it — never claim they are done. Volume, brightness and dark mode can be reversed with the `undo` tool.",
+    "description": "Controls the computer: volume, brightness, window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. restart, shutdown and toggle_wifi put a confirmation on the user's screen and do NOT happen until they press it — never claim they are done. Volume, brightness and dark mode can be reversed with the `undo` tool. close_app takes the app's name in `value` (e.g. 'Task Manager', 'chrome' — in English, or the window title) and reports whether it really closed; repeat its reason to the user and never fall back to pressing Alt+F4, which closes whatever window happens to have focus.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -953,7 +970,7 @@ TOOL = {
             },
             "value": {
                 "type": "STRING",
-                "description": "Optional value: volume level 0-100, text to type, key name, etc."
+                "description": "Optional value: volume level 0-100, text to type, key name, the app to close for close_app, etc."
             }
         },
         "required": []
