@@ -99,7 +99,10 @@ def band_energies(pcm, sr: int) -> np.ndarray:
     Left unnormalised on purpose: the decision below projects one of these onto
     another, and a projection needs real magnitudes.
     """
-    x = np.asarray(pcm, dtype=np.float32)
+    # Flattened: the microphone callback hands over (frames, channels), and a
+    # 2-D block broadcast against the 1-D window below into a frames×frames
+    # matrix whose band lookup raised — which the guard reads as "not a voice".
+    x = np.asarray(pcm, dtype=np.float32).reshape(-1)
     if x.size < 64:
         return np.zeros(len(_BAND_EDGES) - 1, dtype=np.float32)
     x = x - x.mean()
