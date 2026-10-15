@@ -285,3 +285,19 @@ def test_a_question_can_be_dropped(repo):
     assert sr.drop_pending().startswith("Dropped")
     assert sr.state()["state"] == "idle"
     assert "Nothing is waiting" in sr.run(by_button=True)
+
+
+
+def test_a_broken_agent_sandbox_is_explained_and_not_counted(repo, monkeypatch):
+    def start_owned(task, cwd, system, on_done, player=None):
+        on_done(agents.Job(engine="codex", task=task, cwd=str(cwd), done=True, ok=False,
+                           report=agents.SANDBOX_HINT))
+        return ""
+    monkeypatch.setattr(agents, "start_owned", start_owned)
+    for _ in range(3):                    # more than MAX_FAILED_TRIES, still allowed
+        assert sr.ask("improve", task="make add add").startswith("[ASK_USER]")
+        sr.run(by_button=True)
+        r = _wait()
+        assert r.state == "failed" and "sandbox could not start" in r.problem
+    text = announce.take()[-1].text
+    assert "do not use git_project" in text and "AGENT panel" in text

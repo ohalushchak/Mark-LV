@@ -860,6 +860,9 @@ def _run(j: Job, exe: str, player) -> tuple[bool, str]:
                        f"by Claude Code's safety check.)")
         ok = not res.get("is_error") and res.get("subtype", "success") == "success"
         return ok, report
+    if st.get("sandbox_down") and not j.files:
+        return False, SANDBOX_HINT + (f"\n\nCodex's own words: {st['last_text'][:400]}"
+                                      if st["last_text"] else "")
     if st["error"]:
         return False, f"Codex stopped with an error: {st['error'][:600]}"
     if st["result"] is None:
@@ -937,6 +940,10 @@ def _parse_codex(j: Job, ev: dict, st: dict) -> str:
             j.files.update(paths)
             if paths:
                 return f"Edit: {Path(paths[0]).name}" + (f" (+{len(paths) - 1})" if len(paths) > 1 else "")
+        elif t == "command_execution":
+            out = str(item.get("aggregated_output") or "")
+            if any(s in out for s in _SANDBOX_DOWN):
+                st["sandbox_down"] = True
         elif t == "error" and st.get("turn"):
             # Errors before the turn are config warnings (malformed agent
             # roles, plugin hooks); only ones during the work matter.
@@ -947,6 +954,19 @@ def _parse_codex(j: Job, ev: dict, st: dict) -> str:
         err = ev.get("error") if isinstance(ev.get("error"), dict) else {}
         st["error"] = str(err.get("message") or ev.get("message") or "unknown error")
     return ""
+
+
+# Codex's Windows sandbox refreshes its ACL setup before each command. Seen on
+# 2026-10-15: while Codex's computer-use runtime (node_repl.exe) was running,
+# that refresh failed with "setup refresh had errors" in every folder, so no
+# command could start — and Codex still ended its turn "successfully" with a
+# report saying it could not do the job.
+_SANDBOX_DOWN = ("helper_unknown_error", "setup refresh had errors")
+SANDBOX_HINT = (
+    "Codex's Windows sandbox could not start any command on this computer (its setup "
+    "refresh failed — usually while the Codex app's computer-use runtime is running). "
+    "Nothing was done. The user can switch to Claude Code in the AGENT panel, or close "
+    "the Codex app and try again.")
 
 
 def _kill(j: Job, why: str) -> None:

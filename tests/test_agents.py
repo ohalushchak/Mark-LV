@@ -169,6 +169,27 @@ def test_codex_errors_during_the_turn_fail_the_job(tmp_path, monkeypatch):
     assert not j.ok and "usage limit" in j.report
 
 
+
+def test_a_broken_codex_sandbox_is_named_not_reported_as_done(tmp_path, monkeypatch):
+    """Seen live: every command failed with "setup refresh had errors" and Codex
+    still ended its turn normally, saying it could not do the job."""
+    agents.set_engine("codex")
+    events = CODEX_EVENTS[:4] + [
+        {"type": "item.completed", "item": {
+            "type": "command_execution", "exit_code": -1,
+            "aggregated_output": "Failed to create unified exec process: "
+                                 "helper_unknown_error: setup refresh had errors"}},
+        {"type": "item.completed", "item": {"type": "agent_message",
+                                            "text": "I couldn't run any command."}},
+        {"type": "turn.completed"}]
+    _fake_cli(tmp_path, monkeypatch, events)
+    agents.ask("x", tmp_path)
+    _user_answers()
+    agents.run()
+    j = _wait_done()
+    assert not j.ok and j.report.startswith(agents.SANDBOX_HINT)
+    assert "Claude Code in the AGENT panel" in j.report and "couldn't run" in j.report
+
 def test_cancel_stops_the_agent(tmp_path, monkeypatch):
     _fake_cli(tmp_path, monkeypatch, CLAUDE_EVENTS * 20, sleep=0.2)
     agents.ask("Long job", tmp_path)

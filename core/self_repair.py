@@ -117,7 +117,13 @@ PREMATURE = (
 
 
 class RepairError(Exception):
-    pass
+    """Why a run stopped. `environment` marks a failure of the machine, not of
+    the task (the agent's sandbox could not start): it does not count towards
+    MAX_FAILED_TRIES."""
+
+    def __init__(self, message: str, environment: bool = False):
+        super().__init__(message)
+        self.environment = environment
 
 
 @dataclass
@@ -528,7 +534,8 @@ def ask(kind: str, task: str = "", error_id: str = "", player=None) -> str:
             f"change is made against the last commit.") if dirty else ""
     return (f"[ASK_USER] Nothing has started. Ask the user now, in ONE short sentence in "
             f"their language, whether to let {agents.LABEL[engine]} {'fix' if kind == 'fix' else 'make'}"
-            f" this in a separate copy of your code: {summary[:140]}. Mention that nothing "
+            f" this in a separate copy of your code — name the task in a few words so they "
+            f"can catch a misunderstanding: {summary[:140]}. Mention that nothing "
             f"changes until they approve the result on screen.{note} Then END YOUR TURN — "
             f"do not call action='run' in this turn; the user's spoken answer must come "
             f"first (they can also press START on the HUD). If they agree, call "
@@ -600,7 +607,7 @@ def _pipeline(r: Repair, player) -> None:
         _announce_ready(r)
         _step(r, "review", "ready for review", player)
     except RepairError as e:
-        _fail(r, str(e), player)
+        _fail(r, str(e), player, environment=e.environment)
     except Exception as e:
         health.log_error("crash", f"self-repair: {type(e).__name__}: {e}", tool="self_improve",
                          exc=e)
@@ -644,6 +651,8 @@ def _run_agent(r: Repair, player) -> None:
     r.report = (j.report or "")[:4000]
     if j.killed:
         raise RepairError(f"the agent was stopped ({j.killed})")
+    if r.report.startswith(agents.SANDBOX_HINT[:40]):
+        raise RepairError(agents.SANDBOX_HINT, environment=True)
     if not j.ok:
         raise RepairError(f"the agent did not finish: {r.report[:300]}")
 
@@ -674,7 +683,7 @@ def _judge(r: Repair) -> None:
     (DIR / r.id / "patch.diff").write_text(diff, encoding="utf-8")
 
 
-def _fail(r: Repair, problem: str, player) -> None:
+def _fail(r: Repair, problem: str, player, environment: bool = False) -> None:
     r.problem = problem
     try:
         (DIR / r.id).mkdir(parents=True, exist_ok=True)
@@ -684,12 +693,19 @@ def _fail(r: Repair, problem: str, player) -> None:
             encoding="utf-8")
     except OSError:
         pass
-    _remember(r, "cancelled" if "cancelled" in problem else "failed")
+    _remember(r, "cancelled" if "cancelled" in problem
+              else "blocked" if environment else "failed")
     _cleanup(r)
+    # Seen live: after a failed run the model reached for git_project and
+    # delegate_to_agent, which work on the current project (a different one),
+    # and the user was left thinking self-repair had used the wrong project.
     announce.say(
         f"[NOTIFICATION] The self-repair '{r.task[:160]}' stopped without a change to "
-        f"review: {problem[:400]}. Nothing in the running code was touched. Tell the user "
-        f"in one or two short sentences.",
+        f"review: {problem[:500]}. Nothing in the running code was touched. Tell the user "
+        f"in one or two short sentences, with the reason. This was JARVIS's own code in a "
+        f"separate copy: do not use git_project, project_workspace or delegate_to_agent "
+        f"for it — they work on the user's current project. To retry, use self_improve "
+        f"again (after switching the agent in the AGENT panel if the agent was the problem).",
         note=f"Self-repair stopped — {r.task[:50]}", key="self_repair")
     # Last, so whoever watches the state sees "failed" only once it is all done.
     _step(r, "failed", f"stopped: {problem[:120]}", player)

@@ -17,6 +17,13 @@ _Last updated: 2026-10-15_
   - the gate refused, the model told the user it had started anyway, then a 1008 dropped the conversation.
 
   Fixed since: the question tells the model to end its turn; a premature run returns `[NOT_STARTED] … Do NOT say it has started` (also for `delegate_to_agent`); the SELF-REPAIR panel shows the waiting question with START / ✕, so a click can answer it; the missing-package hint is `python -m pip install -U …` (the model had run `python setup.py` in the wrong project).
+- Second live test, 2026-10-15:
+  - START on the panel answered the question;
+  - the model waited for the answer before running;
+  - both runs reached Codex in the worktree, but no command could start: Codex's sandbox setup was failing machine-wide because the Codex app's computer-use runtime held `node_repl.exe` (see `techContext.md`);
+  - the model then used `git_project` and `delegate_to_agent`, which act on the current project (`jarvis-sandbox`), so it looked as if self-repair used the wrong project.
+
+  Fixed since: a sandbox failure is reported as such, with the advice to switch to Claude Code or close the Codex app; it does not count towards the two failed tries. The failure announcement tells the model that this was JARVIS's own code and not to use the project tools for it. The question names the task.
 - In `main` before this: coding by voice with Claude Code / Codex delegation and agent-session announcements; compact mode, tray and quick prompt; the HUD redesign; voice barge-in; monitor-under-cursor screenshots; `close_app` by name.
 
 ## Recent decisions
