@@ -82,6 +82,16 @@ def delegate_to_agent(parameters: dict, player=None, speak=None) -> str:
     return "Unknown action. Use ask, run, status, cancel, settings, set or usage."
 
 
+def _probe() -> tuple[bool, str]:
+    """self_check: the selected agent is installed and signed in."""
+    engine = agents.current()["engine"]
+    exe = agents.find_exe(engine)
+    if not exe:
+        return False, f"{agents.LABEL[engine]} is not installed"
+    if agents.signed_in(engine, exe) is False:
+        return False, f"{agents.LABEL[engine]} is not signed in"
+    return True, f"{agents.LABEL[engine]} is ready"
+
 TOOL = {
     "name": "delegate_to_agent",
     "description": (
@@ -101,7 +111,8 @@ TOOL = {
         "status/cancel check or stop it. settings/set/usage show or change the "
         "agent (engine claude|codex), its model and effort, and its usage limits "
         "('switch to Codex', 'effort high', 'how much limit is left?'; "
-        "refresh=true fetches fresh figures)."
+        "refresh=true fetches fresh figures). Not for JARVIS's own code — fixing or "
+        "improving the assistant itself is self_improve."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -127,4 +138,5 @@ TOOL = {
         },
     },
     "handler": delegate_to_agent,
+    "probe": _probe,
 }

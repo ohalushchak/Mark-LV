@@ -6,6 +6,12 @@ _Last updated: 2026-10-15_
 
 ## Done in this fork
 
+- Self-check and self-repair, mixed from forks (tests in `tests/test_tool_health.py`, `test_self_check.py`, `test_self_repair.py`, `test_repair_panel.py`). Not yet tried live.
+  - **Honest results:** tool arguments checked against the schema before anything runs, with a "nothing ran, correct X" refusal (BlackStarG5); no result is reported as unverified instead of "Done.".
+  - **Health:** a redacted error journal and per-tool green / yellow / red (klcenka9's thresholds, syamsulmuiin's redaction); uncaught thread and asyncio errors journaled.
+  - **Self-check:** `self_check` — status, the journal, one error in detail, probes of tools, packages, git, disk, key and audio, and an optional test run (TeddyDARKVADOR's probes; `TOOL["probe"]` on run_command, git_project, delegate_to_agent, project_workspace).
+  - **Self-repair:** `self_improve` → `core/self_repair.py`: the agent changes JARVIS's code in a worktree; tests before and after (klcenka9), a change check that refuses the whole change on one protected path (TeddyDARKVADOR, Robin), memory of rejected and twice-failed tasks; review with the diff on the HUD, APPLY/DISCARD buttons only, apply = one fast-forward commit with undo; restart through `core/restart_helper.py`, which rolls back a change that stops the next start.
+  - Dry run on the real repository with a stand-in agent: worktree, 271 tests before and after, check, review and discard in 39 s, nothing left behind.
 - Coding by voice and bridges to other AIs, mixed from forks (tests in `tests/test_coding_tools.py`, `test_git_project.py`, `test_project_workspace.py`, `test_agents.py`, `test_agent_panel.py`, `test_agent_relay.py`, `test_ask_chat_app.py`). Tried live on Windows.
   - **Coding tools:**
     - a current project found by name;
@@ -43,6 +49,8 @@ Fork backlog (deferred by the user, 2026-10-14):
 
 ## Known issues
 
+- Tool health sees a handler's caught error only when it calls `health.failed(why)` or its sentence starts like a failure ("Error…", "Failed…"); most actions still return their errors as plain sentences, so their status stays green.
+- Self-repair restart: the new instance runs on the old one's console, so the shell prompt comes back while JARVIS keeps printing. Restart and rollback are untested on macOS and Linux.
 - `screen_process` cannot be pointed at another monitor: it always takes the one under the cursor. Seen live: Task Manager opened on another screen, the model asked to "check the other monitor" four times and got the same screen each time. Fix planned under *Left to build* → Fork backlog.
 - After a `screen_process` call the model often starts a short acknowledgement, and the image turn interrupts it (seen live: 0.2–5 s of speech discarded per capture).
 - Voice barge-in: background speech (a television, people in the room) still gets transcribed as words and confirms a pause; interrupt-by-name is the answer for such rooms. A short "stop" (< 0.64 s) no longer interrupts by voice.

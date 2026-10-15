@@ -2366,6 +2366,174 @@ class AgentPanel(QWidget):
         threading.Thread(target=work, daemon=True, name="agent-models").start()
 
 
+class RepairPanel(QWidget):
+    """The assistant's own health and self-repair, under the AGENT panel.
+
+    One line says whether any tool is failing (core/health.py); a second,
+    shown only while something is happening, follows core/self_repair.py:
+    the agent working, a change waiting for review, an applied change
+    waiting for a restart. The buttons are the human half of the loop —
+    CHECK runs the self-check, REVIEW opens the diff (where APPLY lives),
+    RESTART loads an applied change, STOP cancels a run. The model can do
+    none of APPLY; it has no tool for it."""
+
+    _changed_sig = pyqtSignal()
+    _checked_sig = pyqtSignal()          # a self-check finished (worker thread)
+
+    def __init__(self, owner):
+        super().__init__()
+        from core import health, self_repair
+        self._health = health
+        self._repair = self_repair
+        self._owner = owner
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        top = QHBoxLayout()
+        self._title = QLabel("▸ SELF-REPAIR")
+        self._title.setFont(_font(7, QFont.Weight.Bold))
+        top.addWidget(self._title)
+        top.addStretch()
+        self._health_lbl = QLabel("")
+        self._health_lbl.setFont(_font(7, QFont.Weight.Bold))
+        top.addWidget(self._health_lbl)
+        lay.addLayout(top)
+
+        self._state_lbl = QLabel("")
+        self._state_lbl.setFont(_font(7))
+        self._state_lbl.setWordWrap(True)
+        self._state_lbl.hide()
+        lay.addWidget(self._state_lbl)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self._btns = {}
+        for key, text, tip in (
+                ("check", "CHECK", "Check every tool, the packages, git, disk, key and audio."),
+                ("review", "REVIEW", "Show the change waiting for review — apply or discard it there."),
+                ("restart", "RESTART", "Restart JARVIS to load the applied change."),
+                ("stop", "STOP", "Stop the self-repair. The running code is not touched.")):
+            b = QPushButton(text)
+            b.setFixedHeight(22)
+            b.setFont(_font(7, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, k=key: self._click(k))
+            row.addWidget(b)
+            self._btns[key] = b
+        lay.addLayout(row)
+
+        self._pending = False
+        self._changed_sig.connect(self._schedule)
+        self._checked_sig.connect(lambda: self._btns["check"].setEnabled(True))
+        health.on_change(self._changed_sig.emit)
+        self_repair.on_change(self._changed_sig.emit)
+        self.restyle()
+
+    # ── look ────────────────────────────────────────────────────────────────
+
+    def restyle(self) -> None:
+        self._title.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        self._state_lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        small = (f"QPushButton {{ background: transparent; color: {C.TEXT_MED}; "
+                 f"border: 1px solid {C.BORDER}; border-radius: 3px; }}"
+                 f"QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}")
+        for key, b in self._btns.items():
+            if key == "stop":
+                b.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.RED}; "
+                                f"border: 1px solid {C.RED}; border-radius: 3px; }}"
+                                f"QPushButton:hover {{ background: {_mix_hex(C.BG, C.RED, 0.18)}; }}")
+            elif key == "review":
+                b.setStyleSheet(f"QPushButton {{ background: {_mix_hex(C.BG, C.ACC, 0.16)}; "
+                                f"color: {C.ACC}; border: 1px solid {C.ACC}; border-radius: 3px; }}")
+            else:
+                b.setStyleSheet(small)
+        self.refresh()
+
+    # ── state → widgets ─────────────────────────────────────────────────────
+
+    def _schedule(self) -> None:
+        if not self._pending:
+            self._pending = True
+            QTimer.singleShot(150, self.refresh)
+
+    def refresh(self) -> None:
+        self._pending = False
+        s = self._health.summary()
+        if s["bad"]:
+            text, col = f"● {len(s['bad'])} FAILING", C.RED
+            tip = "Failing often: " + ", ".join(s["bad"])
+        elif s["warn"]:
+            text, col = f"● {len(s['warn'])} WARNING", C.ACC2
+            tip = "Failed at least once recently: " + ", ".join(s["warn"])
+        else:
+            text, col = "● HEALTHY", C.GREEN
+            tip = "No tool has failed this session."
+        if s["errors"]:
+            tip += f"\n{s['errors']} error(s) recorded on this code version."
+        self._health_lbl.setText(text)
+        self._health_lbl.setToolTip(tip)
+        self._health_lbl.setStyleSheet(f"color: {col}; background: transparent;")
+
+        st = self._repair.state()
+        phase = st["state"]
+        line = {
+            "preparing": f"⟳ Preparing — {st.get('step', '')}",
+            "agent": f"⟳ {st.get('step', '')}",
+            "testing": f"⟳ {st.get('step', '')}",
+            "review": f"◆ Ready for review: {st['files'] if 'files' in st else 0} file(s), "
+                      f"+{st.get('added', 0)} −{st.get('removed', 0)}",
+            "applied": "✓ Applied — restart to load it",
+            "failed": f"✗ Stopped: {st.get('problem', '')[:120]}",
+            "discarded": "",
+        }.get(phase, "")
+        if line and phase not in ("idle", "discarded"):
+            task = st.get("task", "")
+            self._state_lbl.setText(f"{line}\n{task[:90]}" if task else line)
+            self._state_lbl.show()
+        else:
+            self._state_lbl.hide()
+        self._btns["review"].setVisible(phase == "review")
+        self._btns["restart"].setVisible(phase == "applied")
+        self._btns["stop"].setVisible(phase in ("preparing", "agent", "testing"))
+
+    # ── buttons ─────────────────────────────────────────────────────────────
+
+    def _click(self, key: str) -> None:
+        if key == "review":
+            self._owner._show_review_overlay()
+        elif key == "restart":
+            self._bg(lambda: self._repair.restart(by_button=True) and "Restarting…")
+        elif key == "stop":
+            self._bg(self._repair.cancel)
+        elif key == "check":
+            self._btns["check"].setEnabled(False)
+            self._bg(self._check, done=self._checked_sig)
+
+    def _check(self) -> str:
+        from core import capabilities
+        result = capabilities.run_probes()
+        bad = [i for i in result["items"] if not i["ok"]]
+        if not bad:
+            return f"Self-check — all {len(result['items'])} parts fine."
+        return (f"Self-check — {len(bad)} problem(s): "
+                + "; ".join(f"{i['name']}: {i['detail']}" for i in bad[:5]))
+
+    def _bg(self, fn, done=None) -> None:
+        def work():
+            try:
+                msg = fn()
+                if msg:
+                    self._owner._log_sig.emit(f"SYS: {msg}")
+            except Exception as e:
+                self._owner._log_sig.emit(f"ERR: self-repair — {e}")
+            finally:
+                if done is not None:
+                    done.emit()
+        threading.Thread(target=work, daemon=True, name="self-repair-ui").start()
+
+
 class LogWidget(QTextEdit):
     _sig = pyqtSignal(str)
 
@@ -3412,6 +3580,120 @@ class ConfirmBanner(_HudOverlay):
         # safe answer wins.
         no.setDefault(True)
         no.setFocus()
+
+
+class ReviewOverlay(_HudOverlay):
+    """A change the assistant made to its own code, before it goes in.
+
+    Everything needed to decide is on one panel: what was asked, which files
+    changed (core files marked), the tests before and after, the agent's own
+    account, and the diff itself. APPLY is a human click that goes straight
+    to core/self_repair.apply(); the model has no tool that can do it. Robin's
+    fork asked for approval without showing the diff — that is the mistake
+    this panel exists to avoid."""
+
+    decided = pyqtSignal(str)          # "apply" | "discard" | "close"
+    _OW = 680
+
+    def __init__(self, repair, diff: str, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            ReviewOverlay {{
+                background: {_glass(C.BG, 248)};
+                border: 1px solid {C.ACC};
+                border-radius: 6px;
+            }}
+        """)
+        self.setFixedWidth(self._OW)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(7)
+
+        hdr = QLabel("◆  SELF-REPAIR — REVIEW")
+        hdr.setFont(_font(11, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+        lay.addWidget(hdr)
+
+        ttl = QLabel(repair.task)
+        ttl.setWordWrap(True)
+        ttl.setFont(_font(10, QFont.Weight.Bold))
+        ttl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        lay.addWidget(ttl)
+
+        def esc(t):
+            return (str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+        rows = []
+        for f in repair.files:
+            mark = {"core": f" <span style='color:{C.ACC2}'>⚠ core code</span>",
+                    "new test": f" <span style='color:{C.GREEN}'>new test</span>"}.get(
+                f["flag"], f" <span style='color:{C.TEXT_DIM}'>{esc(f['flag'])}</span>"
+                if f["flag"] else "")
+            rows.append(f"{esc(f['path'])} <span style='color:{C.GREEN}'>+{f['added']}</span> "
+                        f"<span style='color:{C.RED}'>−{f['removed']}</span>{mark}")
+        b, a = repair.before or {}, repair.after or {}
+        fixed = sorted(set(b.get("failed") or []) - set(a.get("failed") or []))
+        tests = (f"Tests before: {b.get('passed', 0)} passed, {len(b.get('failed') or [])} failed"
+                 f" &nbsp;→&nbsp; after: {a.get('passed', 0)} passed, "
+                 f"{len(a.get('failed') or [])} failed, none newly failing"
+                 + (f", {len(fixed)} fixed" if fixed else ""))
+        info = QLabel("<br>".join(rows) + f"<br><span style='color:{C.TEXT_MED}'>{tests}</span>")
+        info.setTextFormat(Qt.TextFormat.RichText)
+        info.setWordWrap(True)
+        info.setFont(_font(8))
+        info.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        lay.addWidget(info)
+
+        if repair.report:
+            rep = QLabel(repair.report[:700])
+            rep.setWordWrap(True)
+            rep.setFont(_font(8))
+            rep.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            lay.addWidget(rep)
+
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setFixedHeight(330)
+        view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        view.setStyleSheet(f"QTextEdit {{ background: {C.DARK}; color: {C.TEXT}; "
+                           f"border: 1px solid {C.BORDER}; border-radius: 3px; }}")
+        html = []
+        for line in diff.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                col = C.GREEN
+            elif line.startswith("-") and not line.startswith("---"):
+                col = C.RED
+            elif line.startswith("@@"):
+                col = C.PRI
+            elif line.startswith(("diff ", "index ", "+++", "---", "new file", "rename ")):
+                col = C.ACC2
+            else:
+                col = C.TEXT_MED
+            html.append(f"<span style='color:{col}'>{esc(line) or '&nbsp;'}</span>")
+        view.setHtml("<pre style='font-family: Consolas, monospace; font-size: 9pt; "
+                     "margin: 0'>" + "<br>".join(html) + "</pre>")
+        lay.addWidget(view)
+
+        row = QHBoxLayout(); row.setSpacing(8)
+        for key, text, col in (("apply", "▸  APPLY", C.ACC), ("discard", "DISCARD", C.RED),
+                               ("close", "LATER", C.TEXT_MED)):
+            btn = QPushButton(text)
+            btn.setFixedHeight(32)
+            btn.setFont(_font(9, QFont.Weight.Bold if key == "apply" else QFont.Weight.Normal))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {col};
+                    border: 1px solid {col if key != "close" else C.BORDER}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {_mix_hex(C.BG, col, 0.18)}; }}
+            """)
+            btn.clicked.connect(lambda _=False, k=key: self.decided.emit(k))
+            row.addWidget(btn)
+            if key == "close":
+                # Enter without reading must not apply anything.
+                btn.setDefault(True)
+                btn.setFocus()
+        lay.addLayout(row)
 
 
 class AudioDeviceOverlay(_HudOverlay):
@@ -4644,6 +4926,7 @@ class MainWindow(QMainWindow):
     _video_mute_sig  = pyqtSignal(bool)
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
+    _review_sig     = pyqtSignal()           # self-repair: put the change up for review
     _quick_prompt_sig = pyqtSignal()         # global hotkey thread → toggle the prompt
     _notify_sig     = pyqtSignal(str)        # any thread → a tray notification
     _confirm_hide_sig = pyqtSignal()
@@ -4969,6 +5252,7 @@ class MainWindow(QMainWindow):
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
         self._confirm_sig.connect(self._show_confirm_banner)
+        self._review_sig.connect(self._show_review_overlay)
         self._confirm_hide_sig.connect(self._hide_confirm_banner)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
@@ -5867,6 +6151,13 @@ class MainWindow(QMainWindow):
 
         self._agent_panel = AgentPanel(self)
         lay.addWidget(self._agent_panel)
+
+        sep_r = QFrame(); sep_r.setFrameShape(QFrame.Shape.HLine)
+        sep_r.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        lay.addWidget(sep_r)
+
+        self._repair_panel = RepairPanel(self)
+        lay.addWidget(self._repair_panel)
 
         sep_a = QFrame(); sep_a.setFrameShape(QFrame.Shape.HLine)
         sep_a.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
@@ -7074,6 +7365,7 @@ class MainWindow(QMainWindow):
         self._tray.restyle()
         self._quick_prompt.restyle()
         self._agent_panel.restyle()
+        self._repair_panel.restyle()
         self._refresh_hud_btn()
         self._refresh_look_btns()
         self._log.append_log(f"SYS: Theme set to {want}.")
@@ -7463,6 +7755,45 @@ class MainWindow(QMainWindow):
             resolve(bool(accepted))
         except Exception as e:
             self._log.append_log(f"ERR: Confirmation failed — {e}")
+
+    # ── Self-repair review ───────────────────────────────────────────────────
+
+    def _show_review_overlay(self):
+        from core import self_repair
+        r = self_repair.current()
+        self._hide_review_overlay()
+        if r is None or r.state != "review":
+            self._log.append_log("SYS: No self-repair change is waiting for review.")
+            return
+        ov = ReviewOverlay(r, self_repair.diff_text(r), parent=self.centralWidget())
+        ov.decided.connect(self._on_review_decided)
+        self._centre_overlay(ov)
+        self._review_overlay = ov
+        if self._compact.isVisible():
+            self.exit_compact()
+
+    def _hide_review_overlay(self):
+        ov = getattr(self, "_review_overlay", None)
+        if ov is not None:
+            ov.hide()
+            ov.deleteLater()
+            self._review_overlay = None
+
+    def _on_review_decided(self, choice: str):
+        self._hide_review_overlay()
+        if choice == "close":
+            return
+        from core import self_repair
+        fn = self_repair.apply if choice == "apply" else self_repair.discard
+        self._log.append_log("SYS: Self-repair — applying…" if choice == "apply"
+                             else "SYS: Self-repair — discarding…")
+
+        def work():
+            try:
+                self._log_sig.emit(f"SYS: Self-repair — {fn()}")
+            except Exception as e:
+                self._log_sig.emit(f"ERR: Self-repair — {e}")
+        threading.Thread(target=work, daemon=True, name="self-repair-apply").start()
 
     def _open_plugin_manager(self):
         plugins = self.get_plugins() if self.get_plugins else []
@@ -7870,6 +8201,10 @@ class JarvisUI:
     def hide_confirm(self) -> None:
         """Thread-safe: take the gate down."""
         self._win._confirm_hide_sig.emit()
+
+    def show_review(self) -> None:
+        """Thread-safe: put the self-repair change waiting for review on the HUD."""
+        self._win._review_sig.emit()
 
     @property
     def get_plugins(self):

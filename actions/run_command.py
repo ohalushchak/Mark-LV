@@ -264,6 +264,16 @@ def run_command(parameters: dict, player=None) -> str:
     return confirm.request("run_command", f"Run: {command[:60]}", detail, go)
 
 
+def _probe() -> tuple[bool, str]:
+    """self_check: the shell commands go through exists and answers."""
+    try:
+        r = subprocess.run(shell_argv("echo ok"), capture_output=True, text=True,
+                           timeout=10, **jobs.hidden_window_flags())
+    except Exception as e:
+        return False, f"the shell could not start: {e}"
+    ok = r.returncode == 0 and "ok" in (r.stdout or "")
+    return ok, f"{Path(shell_argv('')[0]).name} answers" if ok else f"shell exit {r.returncode}"
+
 TOOL = {
     "name": "run_command",
     "description": (
@@ -298,4 +308,5 @@ TOOL = {
         },
     },
     "handler": run_command,
+    "probe": _probe,
 }

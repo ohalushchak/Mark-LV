@@ -81,6 +81,11 @@ from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import activity
 from core                      import announce as announcer
+from core                      import health
+from core                      import capabilities
+from core                      import self_repair
+from core                      import tool_args
+from core.action_loader        import NO_RESULT
 from core.agent_relay          import Relay as AgentRelay
 from core                      import audio_devices
 from core.action_loader        import discover_actions
@@ -717,6 +722,10 @@ class JarvisLive:
 
         _base_dir = Path(__file__).resolve().parent
         _inline_names = {t["name"] for t in TOOL_DECLARATIONS}
+        self._inline_names = _inline_names
+        # name → parameters schema of every declared tool, rebuilt with each
+        # config, so a call can be checked before it runs (core/tool_args.py).
+        self._tool_schemas: dict[str, dict] = {}
 
         # File-backed tools: every actions/*.py with a TOOL dict, discovered the
         # same way plugins are. Reserved names = the inline tools above, so an
@@ -738,6 +747,7 @@ class JarvisLive:
             logger=lambda msg: print(f"[Plugins] {msg}"),
             notify=lambda msg: self.ui.write_log(f"SYS: {msg}"),
         )
+        capabilities.bind(actions=self._action_registry, plugins=self._plugin_registry)
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
@@ -1491,6 +1501,36 @@ class JarvisLive:
             self._loop
         )
 
+    def restart_app(self) -> None:
+        """Start a fresh JARVIS and exit this one — how an applied self-repair
+        gets loaded. Thread-safe: called from a tool's executor thread or a HUD
+        button. The one-sentence "restarting" is allowed to finish first."""
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            return
+
+        async def _go():
+            await asyncio.sleep(1.0)
+            for _ in range(40):                       # up to 10 s of speech
+                if not self._is_speaking:
+                    break
+                await asyncio.sleep(0.25)
+            if len(self._session_log) >= 3:
+                try:
+                    await asyncio.wait_for(self._save_session_summary(), 10)
+                except Exception:
+                    pass
+            try:
+                self_repair.spawn_restart()
+            except Exception as e:
+                self.ui.write_log(f"ERR: Restart failed — {e}")
+                return
+            print("[UI] Quitting — restart", flush=True)
+            import os as _os
+            _os._exit(0)
+
+        asyncio.run_coroutine_threadsafe(_go(), loop)
+
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
         self.ui.write_log(f"ERR: {tool_name} — {short}")
@@ -1549,6 +1589,8 @@ class JarvisLive:
                       + self._plugin_registry.get_tool_declarations())
         _names = {(d.get("name") if isinstance(d, dict) else getattr(d, "name", ""))
                   for d in _all_decls}
+        self._tool_schemas = {d["name"]: d.get("parameters") for d in _all_decls
+                              if isinstance(d, dict) and d.get("name")}
         sys_prompt = _render_prompt(sys_prompt, {
             "assistant_name": self._asst_name,
             "wake_phrase": self._wake_label,
@@ -1670,6 +1712,20 @@ class JarvisLive:
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
 
+        # Checked before anything runs: a malformed call is refused with what
+        # to correct, so the model fixes it in the same turn instead of a
+        # handler guessing (core/tool_args.py).
+        args, _problem = tool_args.check(
+            args, getattr(self, "_tool_schemas", {}).get(name))
+        if _problem:
+            print(f"[JARVIS] ⚠️  {name}: arguments refused — {_problem}")
+            health.record(name, False, "args", _problem, args=args)
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": tool_args.refusal(name, _problem)})
+        tool_args.accepted(name)
 
         if name == "save_memory":
             category = args.get("category", "notes")
@@ -1688,6 +1744,7 @@ class JarvisLive:
         loop   = asyncio.get_event_loop()
         result = "Done."
 
+        _inline = name in getattr(self, "_inline_names", ())
         try:
             if name == "recall_memory":
                 # Local file search: no network, no second model. Kept out of
@@ -1799,7 +1856,7 @@ class JarvisLive:
                 _ctx = {"player": self.ui, "speak": self.speak,
                         "response": None, "session_memory": None}
                 r = await loop.run_in_executor(None, lambda: self._action_registry.run(name, args, _ctx))
-                result = r or "Done."
+                result = r or NO_RESULT
                 # web_search: mirror results to the on-screen content panel
                 if (name == "web_search" and r
                         and not r.startswith("No results")
@@ -1815,14 +1872,22 @@ class JarvisLive:
                         None,
                         lambda: self._plugin_registry.run(name, args, player=self.ui, session_memory=None)
                     )
-                    result = r or "Done."
+                    result = r or NO_RESULT
                 else:
                     result = f"Unknown tool: {name}"
 
         except Exception as e:
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
+            if _inline:
+                health.record(name, False, "crash", f"{type(e).__name__}: {e}",
+                              exc=e, args=args)
             self.speak_error(name, e)
+        else:
+            # Actions and plugins are recorded by their loaders; the inline
+            # tools above have no loader, so they are recorded here.
+            if _inline:
+                health.record_result(name, result, args=args)
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
@@ -2841,6 +2906,9 @@ class JarvisLive:
 
     async def run(self):
         self._loop = asyncio.get_event_loop()
+        # A task that dies with nobody awaiting it is otherwise only a console
+        # line: put it in the error journal too (core/health.py).
+        self._loop.set_exception_handler(health.asyncio_handler)
         self._reconnect_event = asyncio.Event()
 
         # ── Wire the shared core services to the interface ───────────────────
@@ -2853,6 +2921,9 @@ class JarvisLive:
             log  = self.ui.write_log,
         )
         set_trim_notifier(self.ui.write_log)
+        # Self-repair: the HUD shows its review, and an applied change is
+        # loaded by restarting this process (core/self_repair.py).
+        self_repair.bind(show_review=self.ui.show_review, restart=self.restart_app)
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that
@@ -2919,6 +2990,15 @@ class JarvisLive:
                     self._tool_responded       = False
 
                     print("[JARVIS] Connected.")
+                    if not getattr(self, "_start_marked", False):
+                        # Up and talking: the restart watchdog can stop
+                        # watching, and anything it rolled back is told.
+                        self._start_marked = True
+                        self_repair.mark_started()
+                        _note = self_repair.startup_note()
+                        if _note:
+                            announcer.say(_note, note="Self-repair rolled back",
+                                          key="self_repair")
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"
@@ -3106,6 +3186,7 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
+    health.install_hooks()
     ui = JarvisUI("face.png")
 
     def runner():

@@ -408,9 +408,9 @@ TOOL = {
                 "description": "Comparison aspect: price | specs | reviews | features"
             }
         },
-        "required": [
-            "query"
-        ]
+        # Not "required": compare mode takes `items` and no query; the handler
+        # asks for one when neither is given.
+        "required": []
     },
     "handler": web_search,
 }

@@ -19,6 +19,14 @@ The handler is invoked through signature introspection: it receives ``parameters
 plus whichever of ``player`` / ``speak`` / ``response`` / ``session_memory`` it
 actually declares — so existing action signatures work unchanged.
 
+Optional keys: ``behavior`` / ``scheduling`` (below), and ``probe`` — a
+zero-argument callable returning ``(ok, detail)`` that checks the tool can work
+without doing anything the user would notice (a binary is on PATH, a module
+imports, a harmless call answers). ``self_check`` runs them.
+
+Every call's outcome goes to core/health.py: an escaped exception, a handler
+that called ``health.failed(why)``, or a result that reads like a failure.
+
 Discovery runs once at startup; import errors, validation errors, and name
 collisions are logged and the offending file is skipped — they NEVER raise out
 of discover_actions() and never abort the scan of the remaining files.
@@ -34,9 +42,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from core import health
+
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
 _CTX_KEYS = ("player", "speak", "response", "session_memory")
+
+# What a handler that returned nothing is reported as. It used to be "Done.",
+# which the model read as success and passed on as such — for a call that may
+# have done nothing at all (BlackStarG5/Mark-LIV's honest-reporting fix).
+NO_RESULT = ("The tool ran without an error but returned no result, so completion "
+             "is unverified. Do not claim more than that.")
 
 
 # A tool may declare that the model should NOT be held up waiting for it.
@@ -65,6 +81,7 @@ class ActionRecord:
     error: str = ""
     behavior: Optional[str] = None     # None = the API's default (blocking)
     scheduling: Optional[str] = None   # None = the API's default (WHEN_IDLE)
+    probe: Optional[Callable] = None   # () -> (ok, detail); see the module docstring
 
 
 class ActionRegistry:
@@ -95,17 +112,31 @@ class ActionRegistry:
     def names(self) -> set[str]:
         return set(self._actions.keys())
 
+    def records(self) -> list[ActionRecord]:
+        """Every file that tried to be an action, valid or rejected — for self_check."""
+        return list(self._all_records)
+
+    def schema(self, name: str) -> Optional[dict]:
+        rec = self._actions.get(name)
+        return rec.parameters if rec else None
+
     # -- called by main.py from _execute_tool --
     def run(self, name: str, parameters: dict, ctx: dict | None = None) -> str:
         rec = self._actions.get(name)
         if rec is None or not rec.valid:
             return f"Action '{name}' is not available."
+        health.begin_call()
         try:
-            return _call_handler(rec.handler, parameters, ctx or {}) or "Done."
+            result = _call_handler(rec.handler, parameters, ctx or {})
         except Exception as e:
+            health.end_call()
             self._logger(f"Action '{name}' crashed during run(): {e}")
             traceback.print_exc()
+            health.record(name, False, "crash", f"{type(e).__name__}: {e}", exc=e,
+                          args=parameters)
             return f"Tool '{name}' failed: {e}"
+        health.record_result(name, result, args=parameters)
+        return result or NO_RESULT
 
 
 def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:
@@ -151,7 +182,8 @@ def _validate(module, filename: str) -> ActionRecord:
     return ActionRecord(name=name, description=description.strip(), parameters=parameters,
                         handler=handler, file=filename, valid=True, error="",
                         behavior=_opt_upper(tool.get("behavior"), _BEHAVIORS),
-                        scheduling=_opt_upper(tool.get("scheduling"), _SCHEDULING))
+                        scheduling=_opt_upper(tool.get("scheduling"), _SCHEDULING),
+                        probe=tool.get("probe") if callable(tool.get("probe")) else None)
 
 
 def discover_actions(actions_dir: Path, reserved_names: set[str] | None = None,

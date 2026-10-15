@@ -372,6 +372,15 @@ def git_project(parameters: dict, player=None) -> str:
             "commit, fetch, pull, push, pr_list or pr_create.")
 
 
+def _probe() -> tuple[bool, str]:
+    """self_check: git is installed."""
+    exe = shutil.which("git")
+    if not exe:
+        return False, "git is not on PATH"
+    r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10,
+                       **jobs.hidden_window_flags())
+    return r.returncode == 0, (r.stdout or r.stderr).strip()[:80]
+
 TOOL = {
     "name": "git_project",
     "description": (
@@ -410,4 +419,5 @@ TOOL = {
         },
     },
     "handler": git_project,
+    "probe": _probe,
 }

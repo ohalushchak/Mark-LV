@@ -524,6 +524,11 @@ class Job:
     denied: int = 0
     files: set = field(default_factory=set)
     ended: float = 0.0
+    # Set for a job another module owns (core/self_repair.py): its own rules
+    # instead of _SYSTEM, and its own handling of the outcome instead of the
+    # announcement below — that module announces once it has checked the work.
+    system: str = ""
+    on_done: Callable[["Job"], None] | None = None
 
     @property
     def minutes(self) -> float:
@@ -664,6 +669,36 @@ def status() -> str:
     return f"{LABEL[j.engine]}'s last task ({j.task[:120]}) {state_}. Its report: {j.report[:700]}"
 
 
+def start_owned(task: str, cwd: Path, system: str, on_done: Callable[[Job], None],
+                player=None) -> str:
+    """Start a job for another module, which has already asked the user.
+    Returns '' when started, else a sentence saying why not. The selected
+    engine, model and effort apply, as for any job."""
+    global _job
+    cur = current()
+    engine = cur["engine"]
+    exe = find_exe(engine)
+    if not exe:
+        return f"{LABEL[engine]} is not installed on this computer."
+    level, sentence = _limit_problem(engine)
+    if level == "blocked":
+        return sentence
+    model = cur["model"]
+    if engine == "codex" and not model:
+        model = next((m.id for m in models("codex") if m.is_default), "")
+    with _lock:
+        if _job and not _job.done:
+            return _busy() or "An agent is busy."
+        j = Job(engine=engine, task=task, cwd=str(cwd), model=model, effort=cur["effort"],
+                system=system, on_done=on_done)
+        _job = j
+    _log(player, f"SYS: {LABEL[engine]} started: {task[:90]}")
+    threading.Thread(target=_work, args=(j, exe, player), name="coding-agent",
+                     daemon=True).start()
+    _changed()
+    return ""
+
+
 def cancel() -> str:
     global _pending
     with _lock:
@@ -684,7 +719,7 @@ def build_argv(j: Job, exe: str) -> list[str]:
     if j.engine == "claude":
         argv = [exe, "-p", "--output-format", "stream-json", "--verbose",
                 "--permission-mode", "auto", "--permission-prompts", "none",
-                "--append-system-prompt", _SYSTEM]
+                "--append-system-prompt", j.system or _SYSTEM]
         if j.model:
             argv += ["--model", j.model]
         if j.effort:
@@ -712,7 +747,7 @@ def _prompt(j: Job) -> str:
     if j.details:
         text += f"\n\nWhen approving, the user added: {j.details}"
     if j.engine == "codex":
-        text = f"{_SYSTEM}\n\nTask:\n{text}"        # codex exec has no system-prompt flag
+        text = f"{j.system or _SYSTEM}\n\nTask:\n{text}"   # codex exec has no system-prompt flag
     return text
 
 
@@ -725,6 +760,15 @@ def _work(j: Job, exe: str, player) -> None:
     j.ok, j.report, j.done = ok, report, True
     if j.session_id:
         _sessions[(j.engine, j.cwd)] = j.session_id
+    if j.on_done is not None:
+        _log(player, f"SYS: {LABEL[j.engine]} {'finished' if ok else 'did not finish'} "
+                     f"after {j.elapsed}.")
+        try:
+            j.on_done(j)
+        except Exception as e:
+            _log(player, f"ERR: handling {LABEL[j.engine]}'s result failed — {e}")
+        _changed()
+        return
     _log(player, f"SYS: {LABEL[j.engine]} {'finished' if ok else 'did not finish'} "
                  f"after {j.elapsed} — report on screen.")
     if player is not None:

@@ -330,6 +330,11 @@ def project_workspace(parameters: dict, player=None) -> str:
     return "Unknown action. Use open, info, list, search, read, patch or create."
 
 
+def _probe() -> tuple[bool, str]:
+    """self_check: the remembered current project still exists."""
+    root = projects.current()
+    return True, (f"current project: {root.name}" if root else "no current project chosen")
+
 TOOL = {
     "name": "project_workspace",
     "description": (
@@ -368,4 +373,5 @@ TOOL = {
         },
     },
     "handler": project_workspace,
+    "probe": _probe,
 }

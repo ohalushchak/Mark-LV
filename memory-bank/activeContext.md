@@ -6,45 +6,36 @@ _Last updated: 2026-10-15_
 
 ## Current focus
 
-- Coding by voice and bridges to other AIs merged into `main` and tried live on Windows in five sessions:
-  - **Coding tools:** `run_command` (`core/shell_policy.py`, `core/jobs.py`), `git_project` and `project_workspace` on a shared current project (`core/projects.py`).
-  - **Agents:** `delegate_to_agent` (`core/agents.py`) runs Claude Code or Codex. The AGENT panel shows the engine, model, effort, 5-hour and weekly limits and the running job with STOP; there is also a card line and a tray submenu.
-  - **Chat apps:** `ask_chat_app`.
-  - **Agent-session announcements:** `core/agent_hook.py`, `core/agent_relay.py`, switched on in CONTROLS.
-- Live results:
-  - **Coding:** project, files, commands, git, delegation (Claude with session resume, Codex) and relay announcements all work.
-  - **Fixed along the way:**
-    - "pass to Claude/Codex" was routed to `ask_chat_app`;
-    - a project named by the relay became the current one;
-    - announcements while asleep were answered as requests ("I am asleep…");
-    - every announcement while asleep was followed by a 1008 disconnect.
-- In `main` before this: compact mode, tray and quick prompt; the HUD redesign; voice barge-in; monitor-under-cursor screenshots; `close_app` by name.
+- Self-check and self-repair, stages 1–5, committed on branch `feature/self-repair` (not merged into `main`, not yet tried live):
+  1. **Honest results:** `core/tool_args.py` checks every call against its schema in `_execute_tool`; "no result" is reported as unverified.
+  2. **Health:** `core/health.py` — the error journal and per-tool status.
+  3. **Self-check:** `core/capabilities.py` and the `self_check` tool.
+  4. **Self-repair:** `core/self_repair.py` and the `self_improve` tool, on top of `agents.start_owned`.
+  5. **Review, apply, restart:** `ReviewOverlay` and `RepairPanel` in `ui.py`, `JarvisLive.restart_app`, `core/restart_helper.py`.
+- In `main` before this: coding by voice with Claude Code / Codex delegation and agent-session announcements; compact mode, tray and quick prompt; the HUD redesign; voice barge-in; monitor-under-cursor screenshots; `close_app` by name.
 
 ## Recent decisions
 
-- Coding tools: mixed from forks.
-  - BlackStarG5's code is the base: the job engine, exact-text edits with a read hash, and fixed git operations.
-  - PrinceRaval1706 gave the three tiers, but its substring classifier was not taken: it called `npm update` and `python tools.py` safe. Its cancel never worked (a missing `global`).
-  - deepakchouguledatascience gave the visible-terminal mode.
-- Tests and builds count as SAFE commands; installs, deletes, scripts and anything unrecognised need CONFIRM; push and PR creation always need CONFIRM; commit, branch, switch, edits and new files go on the undo stack instead.
-- Agents: rayhao-han's two-call gate (ask → the user answers → run), extended to Codex.
-  - Claude runs in `auto` mode without prompts; Codex runs in its workspace-write sandbox.
-  - Only one agent job runs at a time, and agent changes are not undoable (git diff shows them).
-  - "Default" model for Codex means the account's default from the app-server, because Codex's own config names a refused model.
-- Routing: anything addressed to Claude, Claude Code or Codex about code goes to `delegate_to_agent`. `ask_chat_app` is only for general questions to the chat apps, and refuses coding jobs with `[WRONG_TOOL]`. A project named in a delegation is used for that job but does not become the current project.
-- Usage limits: Codex's come free from the app-server, polled every 5 min. Claude's arrive with each run; the ↻ refresh sends a one-word haiku request. A 5-hour or weekly window at ≥90 % adds a warning to the question; a reached limit refuses and offers the other agent.
-- Background results (commands, push, agents, relay) are spoken by one announcer when the room is quiet. While asleep too, at the user's request: they preferred a voice to the tray notification.
-  - Each is framed as `[NOTIFICATION]` news to pass on, not a request, and the assistant stays asleep afterwards.
-  - There is a 3 s settle time after each connect.
-  - The tray only gets an item still unsaid after a minute.
-- The mic stopping is signalled to the server with `audio_stream_end` (on falling asleep, after an answer while asleep, on connecting asleep). Without it the server waited for audio and closed with 1008 "The operation was aborted". The fifth live session, with announcements asleep and awake and a long conversation, had no 1008.
-- Relay: finished turns shorter than 30 s are not announced; permission prompts after 15 s, and only if the transcript has not moved.
-- Agents commit only on the user's explicit request in the current message (`AGENTS.md` → *Commits*).
+- Self-repair mixes the forks and avoids their weak spots:
+  - **The fixer:** our coding agent (Claude Code / Codex), not a one-shot Gemini diff like every fork used.
+  - **Ideas taken:** tests before and after and the review window (klcenka9); the whole change refused on one bad path, tests never editable by the fixer, memory of failed and rejected tasks (TeddyDARKVADOR); validation in a separate copy (syamsulmuiin, here a git worktree); stale-HEAD check and case-insensitive protected paths (Robin); schema checks of tool calls (BlackStarG5).
+  - **Rejected:** auto-applying "safe" changes (klcenka9), approval by phrase match or by tool parameter (syamsulmuiin), approval without showing the diff (Robin), the 10-minute auto-update with `os._exit` and the approval-free self-coding plugin (dragonballls). Upstream self-update was not ported: the fork has diverged too far for automatic merges.
+- Only the HUD's APPLY button applies a change; `self_improve` can ask, run, show, discard, cancel and restart. Starting a run is behind the same "the user answered after the question" gate as `delegate_to_agent`.
+- Protected from the fixer: the gates and the loop that checks it — confirm, undo, shell policy, loaders, tool_args, health, capabilities, self_repair, restart_helper, agents, activity — plus the prompt, `config_manager`, AGENTS.md, CLAUDE.md, `.gitignore`, requirements, setup, `config/`, `.github/` and existing tests. New `tests/test_*.py` files are allowed and flagged. `main.py`, `ui.py` and `core/*` changes are allowed but marked "core code" in the review.
+- An applied change is one commit on the user's current branch (fast-forward from the worktree branch), made by the APPLY click — that click is the user's explicit request to commit.
+- The error journal and self-repair data live under `~/.jarvis/`, outside the public repository.
 
 ## Next steps
 
+- Try it live on Windows:
+  - a malformed call being corrected;
+  - `self_check` status, errors and probe;
+  - a real fix with Claude Code and then with Codex in the worktree;
+  - review, APPLY, the restart and undo;
+  - a deliberately broken change, to see the watchdog roll it back.
+- `yt-dlp` is not installed on this machine (found by the first self-check): YouTube on the HUD falls back to the browser until `pip install -U yt-dlp`.
+- Add `health.failed(why)` to the actions' broad `except` blocks so their failures show in tool health.
 - Handle the Live server's GoAway, the remaining 1008 cause: it arrives before the session-duration limit, and today the server closes with "client failed to close the connection after receiving a GoAway signal". Reconnect with the resumption handle when `go_away` arrives.
+- A 1008 "The operation was aborted" came back once on 2026-10-15, right after the second announcement spoken while asleep (each followed by `audio_stream_end`). Watch whether it repeats after consecutive announcements asleep.
 - Muting the mic while awake also stops the stream without `audio_stream_end` — watch for 1008s after answers while muted.
 - Monitor choice for `screen_process` — deferred; the plan is in `progress.md` → Fork backlog.
-- Try interrupt-by-name live, and each wake engine on a real microphone.
-- Pick the next feature from the upstream "LVI+" roadmap (see `progress.md`).
