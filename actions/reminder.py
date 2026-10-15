@@ -1,3 +1,11 @@
+"""Reminder skill: the `reminder` tool.
+
+Sets a one-off reminder for a given date and time (YYYY-MM-DD, HH:MM). It writes
+a small notify script and registers it with the OS scheduler, so the reminder
+fires even if JARVIS is closed by then: Task Scheduler on Windows, a launchd
+agent on macOS, `systemd-run --user` (falling back to `at`) on Linux. Past
+times and unparsable dates are refused with a spoken explanation.
+"""
 import json
 import os
 import platform
