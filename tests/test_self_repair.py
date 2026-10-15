@@ -301,3 +301,43 @@ def test_a_broken_agent_sandbox_is_explained_and_not_counted(repo, monkeypatch):
         assert r.state == "failed" and "sandbox could not start" in r.problem
     text = announce.take()[-1].text
     assert "do not use git_project" in text and "AGENT panel" in text
+
+
+
+def test_run_after_start_says_it_is_already_running(repo, monkeypatch):
+    import threading
+    gate = threading.Event()
+
+    def start_owned(task, cwd, system, on_done, player=None):
+        def later():
+            gate.wait(10)
+            on_done(agents.Job(engine="claude", task=task, cwd=str(cwd), done=True, ok=True,
+                               report="nothing"))
+        threading.Thread(target=later, daemon=True).start()
+        return ""
+    monkeypatch.setattr(agents, "start_owned", start_owned)
+    sr.ask("improve", task="make add add")
+    sr.run(by_button=True)
+    _wait(states=("agent",))
+    assert sr.run().startswith("[ALREADY_STARTED]")
+    gate.set()
+    _wait()
+
+
+def test_the_last_applied_change_can_be_taken_back_after_a_restart(repo, monkeypatch):
+    _agent(monkeypatch, lambda wt: (wt / "actions" / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"))
+    base = _git(repo, "rev-parse", "HEAD")
+    sr.ask("improve", task="make add add instead of subtracting, as the user asked today")
+    sr.run(by_button=True)
+    _wait()
+    sr.apply()
+    subject = _git(repo, "log", "-1", "--format=%s")
+    assert subject.endswith("…") and len(subject) <= 72 and " as the user" not in subject[-6:]
+    undo.clear()                                        # a restart empties the undo stack
+    with sr._lock:
+        sr._current, sr._loaded = None, False
+    out = sr.revert_last()
+    assert out.startswith("[REVERTED]") and _git(repo, "rev-parse", "HEAD") == base
+    assert sr.current().state == "applied" and sr.current().restart_offered
+    assert sr.revert_last() == "No applied self-repair is left to take back."

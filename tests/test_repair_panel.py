@@ -118,3 +118,13 @@ def test_a_waiting_question_shows_start(panel, monkeypatch):
         sr._pending = None
     panel.refresh()
     assert panel._btns["start"].isHidden()
+
+
+
+def test_the_review_names_do_not_collide_with_the_document_review():
+    """Seen live: show_review / _review_sig already belonged to the document
+    review; the later definitions won and the self-repair review never opened."""
+    import inspect
+    assert list(inspect.signature(ui.JarvisUI.show_repair_review).parameters) == ["self"]
+    assert "title" in inspect.signature(ui.JarvisUI.show_review).parameters
+    assert hasattr(ui.MainWindow, "_repair_review_sig")

@@ -553,6 +553,14 @@ def run(details: str = "", player=None, by_button: bool = False) -> str:
     if p is None or time.monotonic() - p["asked_at"] > ASK_TTL:
         with _lock:
             _pending = None
+        r = current()
+        if r is not None and r.state in RUNNING:
+            # Seen live: the user pressed START while the model was still
+            # waiting, then the model's own run found nothing pending and told
+            # the user it had failed — while the run was under way.
+            return (f"[ALREADY_STARTED] It is already running (the user pressed START on the "
+                    f"HUD): {r.task[:120]} — {r.step}. Tell them in a few words; the result "
+                    f"is announced when it is ready for review.")
         return ("Nothing is waiting for the user's approval. Call self_improve with action "
                 "'fix' or 'improve' first, then wait for their answer.")
     if not by_button and not activity.user_answered_since(p["asked_at"]):
@@ -765,7 +773,7 @@ def apply() -> str:
             raise RepairError("JARVIS's code has new commits since the change was made; "
                               "discard it and run it again")
         if _git("rev-parse", "HEAD", cwd=wt).strip() == r.base:
-            msg = (f"Self-repair: {r.task[:60]}\n\n"
+            msg = (f"Self-repair: {_subject(r.task)}\n\n"
                    f"Made by {agents.LABEL.get(r.engine, r.engine)} through JARVIS self_improve "
                    f"and approved on the HUD. Tests: {r.after.get('passed', 0)} passed, none newly "
                    f"failing.")
@@ -796,8 +804,52 @@ def apply() -> str:
     return f"Applied as commit {commit[:8]}."
 
 
+def _subject(task: str, limit: int = 58) -> str:
+    """The task as a commit subject: whole words, at most `limit` characters."""
+    task = " ".join(str(task).split())
+    if len(task) <= limit:
+        return task
+    return task[:limit].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
+
+
+def revert_last() -> str:
+    """Take back the last applied self-repair, also after a restart (the undo
+    stack lives in memory and does not survive one): only while it is still
+    the checked-out commit."""
+    global _current
+    _load()           # first, so a later load cannot overwrite what is set here
+    hist = _history()
+    reverted = {h.get("commit", "")[:12] for h in hist if h.get("outcome") == "reverted"}
+    applied = [h for h in hist if h.get("outcome") == "applied" and h.get("commit")
+               and h["commit"][:12] not in reverted]
+    if not applied:
+        return "No applied self-repair is left to take back."
+    last = applied[-1]
+    head = _git("rev-parse", "HEAD").strip()
+    if not head.startswith(last["commit"]):
+        return ("The last applied self-repair is no longer the latest commit (there are newer "
+                "commits), so it cannot be taken back automatically.")
+    base = _git("rev-parse", f"{head}~1").strip()
+    _git("reset", "--keep", base)
+    _clear_applied()
+    r = Repair(id=datetime.now().strftime("%Y%m%d-%H%M%S"), kind="revert",
+               task=f"take back: {last.get('task', '')[:100]}", prompt="", fingerprint="",
+               base=base, commit=head, state="applied",
+               step="taken back — restart to load the previous code",
+               restart_offered=time.monotonic())
+    _remember(r, "reverted")
+    with _lock:
+        _current = r
+    _changed()
+    return ("[REVERTED] The last self-repair is taken back; the files are as before it. The "
+            "running assistant still has it loaded: ask the user whether to restart now, and "
+            "call self_improve with action='restart' only if they agree.")
+
+
 def _undo_apply(base: str, commit: str) -> str:
     head = _git("rev-parse", "HEAD").strip()
+    if head == base:
+        return "It was already taken back."
     if head != commit:
         return "Not undone: there are newer commits on top of it."
     _git("reset", "--keep", base)

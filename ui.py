@@ -4942,7 +4942,7 @@ class MainWindow(QMainWindow):
     _video_mute_sig  = pyqtSignal(bool)
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
-    _review_sig     = pyqtSignal()           # self-repair: put the change up for review
+    _repair_review_sig = pyqtSignal()        # self-repair: put the change up for review
     _quick_prompt_sig = pyqtSignal()         # global hotkey thread → toggle the prompt
     _notify_sig     = pyqtSignal(str)        # any thread → a tray notification
     _confirm_hide_sig = pyqtSignal()
@@ -5268,7 +5268,7 @@ class MainWindow(QMainWindow):
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
         self._confirm_sig.connect(self._show_confirm_banner)
-        self._review_sig.connect(self._show_review_overlay)
+        self._repair_review_sig.connect(self._show_review_overlay)
         self._confirm_hide_sig.connect(self._hide_confirm_banner)
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
@@ -8218,9 +8218,10 @@ class JarvisUI:
         """Thread-safe: take the gate down."""
         self._win._confirm_hide_sig.emit()
 
-    def show_review(self) -> None:
-        """Thread-safe: put the self-repair change waiting for review on the HUD."""
-        self._win._review_sig.emit()
+    def show_repair_review(self) -> None:
+        """Thread-safe: put the self-repair change waiting for review on the HUD.
+        (Not show_review: that name is the document review's.)"""
+        self._win._repair_review_sig.emit()
 
     @property
     def get_plugins(self):

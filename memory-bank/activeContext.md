@@ -24,6 +24,12 @@ _Last updated: 2026-10-15_
   - the model then used `git_project` and `delegate_to_agent`, which act on the current project (`jarvis-sandbox`), so it looked as if self-repair used the wrong project.
 
   Fixed since: a sandbox failure is reported as such, with the advice to switch to Claude Code or close the Codex app; it does not count towards the two failed tries. The failure announcement tells the model that this was JARVIS's own code and not to use the project tools for it. The question names the task.
+- Third live test, 2026-10-15, with Claude Code:
+  - the full loop worked up to APPLY: a worktree, tests, Claude's edit, the check, the review on the HUD, APPLY → commit `1b28369` (a docstring in `actions/weather_report.py`, still on the branch);
+  - Claude refused the protected `core/confirm.py` by itself;
+  - a second request for the same docstring found it already there.
+
+  Found and fixed since: `show_review` and `_review_sig` already existed for the document review, so the voice "show it" crashed and the self-repair overlay was wired to the document review's signal — renamed to `show_repair_review` / `_repair_review_sig`. A `run` after START now answers `[ALREADY_STARTED]` instead of "nothing is waiting" (the model had told the user it failed while it ran). New `self_improve` action `undo` → `self_repair.revert_last()` takes back the last applied change after a restart too. Commit subjects are cut at a word.
 - In `main` before this: coding by voice with Claude Code / Codex delegation and agent-session announcements; compact mode, tray and quick prompt; the HUD redesign; voice barge-in; monitor-under-cursor screenshots; `close_app` by name.
 
 ## Recent decisions

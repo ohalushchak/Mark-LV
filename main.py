@@ -2930,7 +2930,7 @@ class JarvisLive:
         set_trim_notifier(self.ui.write_log)
         # Self-repair: the HUD shows its review, and an applied change is
         # loaded by restarting this process (core/self_repair.py).
-        self_repair.bind(show_review=self.ui.show_review, restart=self.restart_app)
+        self_repair.bind(show_review=self.ui.show_repair_review, restart=self.restart_app)
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that

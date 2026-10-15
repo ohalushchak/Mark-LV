@@ -30,6 +30,8 @@ def self_improve(parameters: dict, player=None) -> str:
             return self_repair.cancel()
         if action == "restart":
             return self_repair.restart(player=player)
+        if action == "undo":
+            return self_repair.revert_last()
         return self_repair.describe()
     except Exception as e:
         health.failed(e)
@@ -50,7 +52,8 @@ TOOL = {
         "the diff on the HUD, where ONLY the user applies or discards it — never "
         "claim it is applied. 'status' reports progress, 'cancel' stops it, "
         "'discard' throws a ready change away at the user's request, 'restart' "
-        "reloads JARVIS after an applied change, only once the user agreed. For "
+        "reloads JARVIS after an applied change, only once the user agreed, 'undo' "
+        "takes back the last applied self-repair (also after a restart). For "
         "code in the user's own projects use delegate_to_agent; to find out what "
         "is broken use self_check."
     ),
@@ -59,9 +62,9 @@ TOOL = {
         "properties": {
             "action": {"type": "STRING",
                        "enum": ["fix", "improve", "run", "status", "review", "discard",
-                                "cancel", "restart"],
+                                "cancel", "restart", "undo"],
                        "description": "fix | improve | run | status | review | discard | "
-                                      "cancel | restart"},
+                                      "cancel | restart | undo"},
             "task": {"type": "STRING",
                      "description": "improve: the change in full, in English; fix: anything "
                                     "the user said about the problem"},

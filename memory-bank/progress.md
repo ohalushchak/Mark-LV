@@ -49,6 +49,7 @@ Fork backlog (deferred by the user, 2026-10-14):
 
 ## Known issues
 
+- `ui.py` reuses names easily: a new `JarvisUI` / `MainWindow` member with an existing name silently replaces the old one (it happened with `show_review` / `_review_sig`). Check with a grep before adding one.
 - Tool health sees a handler's caught error only when it calls `health.failed(why)` or its sentence starts like a failure ("Error…", "Failed…"); most actions still return their errors as plain sentences, so their status stays green.
 - Self-repair restart: the new instance runs on the old one's console, so the shell prompt comes back while JARVIS keeps printing. Restart and rollback are untested on macOS and Linux.
 - `screen_process` cannot be pointed at another monitor: it always takes the one under the cursor. Seen live: Task Manager opened on another screen, the model asked to "check the other monitor" four times and got the same screen each time. Fix planned under *Left to build* → Fork backlog.
