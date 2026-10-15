@@ -47,10 +47,14 @@ def _wait_exit(pid: int, timeout: float = 30.0) -> None:
         pass
 
 
-def _launch(cmd: list[str], cwd: str) -> subprocess.Popen:
+def _launch(cmd: list[str], cwd: str, new_console: bool = True) -> subprocess.Popen:
     kw = {}
-    if os.name == "nt":
-        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    if os.name == "nt" and new_console:
+        # Its own console window: the terminal it was started from no longer
+        # shows a process that outlived its parent (seen live: the restarted
+        # JARVIS ran and connected, and the tab showed nothing). The full log
+        # is also in ~/.jarvis/logs/console.log (core/console_log.py).
+        kw["creationflags"] = subprocess.CREATE_NEW_CONSOLE
     return subprocess.Popen(cmd, cwd=cwd, **kw)
 
 
@@ -60,12 +64,13 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
                           timeout=60, **kw)
 
 
-def watch(cmd: list[str], repo: str, state: Path, watch_s: float = WATCH_SECONDS) -> str:
+def watch(cmd: list[str], repo: str, state: Path, watch_s: float = WATCH_SECONDS,
+          new_console: bool = True) -> str:
     """Start `cmd` and watch it. Returns what happened, for the log and tests:
     'started', 'exited', 'still running', 'rolled back', 'not rolled back'."""
     ok = state / "started.ok"
     ok.unlink(missing_ok=True)
-    child = _launch(cmd, repo)
+    child = _launch(cmd, repo, new_console)
     deadline = time.monotonic() + watch_s
     code = None
     while time.monotonic() < deadline:
@@ -93,7 +98,7 @@ def watch(cmd: list[str], repo: str, state: Path, watch_s: float = WATCH_SECONDS
     (state / "rolled_back.json").write_text(json.dumps({
         "commit": applied["commit"], "base": applied["base"], "exit": code,
         "at": datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
-    _launch(cmd, repo)
+    _launch(cmd, repo, new_console)
     return "rolled back"
 
 

@@ -128,3 +128,39 @@ def test_the_review_names_do_not_collide_with_the_document_review():
     assert list(inspect.signature(ui.JarvisUI.show_repair_review).parameters) == ["self"]
     assert "title" in inspect.signature(ui.JarvisUI.show_review).parameters
     assert hasattr(ui.MainWindow, "_repair_review_sig")
+
+
+def test_the_hologram_shows_a_working_agent_then_how_it_ended(monkeypatch):
+    """The user could not tell when Claude / Codex was still working."""
+    import time as _t
+    from core import agents
+    canvas = ui.HudCanvas("face.png")
+    canvas.resize(400, 400)
+    job = agents.Job(engine="codex", task="x", cwd=".")
+    monkeypatch.setattr(agents, "job", lambda: job)
+    monkeypatch.setattr(sr, "state", lambda: {"state": "idle"})
+    canvas._poll_agent()
+    assert canvas._agent["engine"] == "codex" and canvas._agent["label"] == "CODEX WORKING"
+    canvas.grab()                                         # paints without error
+    job.done, job.ok = True, False
+    canvas._poll_agent()
+    assert canvas._agent is None and canvas._agent_flash[2] == "✗  CODEX STOPPED"
+    canvas.grab()
+    canvas._agent_flash = (_t.time() - 1, ui.C.GREEN, "")
+    canvas._poll_agent()
+    assert canvas._agent_flash is None
+
+
+def test_a_self_repair_counts_as_waiting_through_its_tests(monkeypatch):
+    from core import agents
+    canvas = ui.HudCanvas("face.png")
+    monkeypatch.setattr(agents, "job", lambda: None)
+    monkeypatch.setattr(agents, "current", lambda: {"engine": "claude"})
+    monkeypatch.setattr(sr, "state", lambda: {"state": "testing",
+                                             "step": "running the tests before the change"})
+    canvas._poll_agent()
+    assert canvas._agent["engine"] == "claude"
+    assert canvas._agent["label"].startswith("SELF-REPAIR · RUNNING THE TESTS")
+    monkeypatch.setattr(sr, "state", lambda: {"state": "review"})
+    canvas._poll_agent()
+    assert canvas._agent_flash[2] == "✓  SELF-REPAIR DONE"

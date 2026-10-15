@@ -30,6 +30,22 @@ _Last updated: 2026-10-15_
   - a second request for the same docstring found it already there.
 
   Found and fixed since: `show_review` and `_review_sig` already existed for the document review, so the voice "show it" crashed and the self-repair overlay was wired to the document review's signal — renamed to `show_repair_review` / `_repair_review_sig`. A `run` after START now answers `[ALREADY_STARTED]` instead of "nothing is waiting" (the model had told the user it failed while it ran). New `self_improve` action `undo` → `self_repair.revert_last()` takes back the last applied change after a restart too. Commit subjects are cut at a word.
+- Fourth live test, 2026-10-15, with Claude Code:
+  - two changes went through review and APPLY: `5893918` (desktop.py docstring) and `b5a636d` (reminder.py docstring), both on the branch;
+  - the voice restart closed the old instance, and the new one connected (`started.ok` at 21:29:24), but its output never reached the terminal tab and it is gone now, so what happened after is unknown;
+  - "undo after restart" was therefore not tried.
+
+  Also seen:
+  - the model asked `delegate_to_agent` about the self-repair job and named the wrong project;
+  - after ✕ its `run` read "nothing is waiting", it asked again by itself and said it had started (a lie it keeps telling after `[NOT_STARTED]`);
+  - the session-duration GoAway gave a 1008 at 594 s, and a fresh session got 1008 152 s after an `audio_stream_end` while asleep.
+
+  Fixed since:
+  - the console is copied to `~/.jarvis/logs/console.log`;
+  - the restarted instance gets its own console window;
+  - `delegate_to_agent status` points a self-repair job to `self_improve`;
+  - a `run` after ✕ answers `[DECLINED]`.
+- Agent ring on the hologram (at the user's request: they could not tell when Claude / Codex was still working): coral for Claude Code, violet for Codex, also during a self-repair's test runs; a green or red flash at the end.
 - In `main` before this: coding by voice with Claude Code / Codex delegation and agent-session announcements; compact mode, tray and quick prompt; the HUD redesign; voice barge-in; monitor-under-cursor screenshots; `close_app` by name.
 
 ## Recent decisions
@@ -54,6 +70,7 @@ _Last updated: 2026-10-15_
 - `yt-dlp` is not installed on this machine (found by the first self-check): YouTube on the HUD falls back to the browser until `pip install -U yt-dlp`.
 - Add `health.failed(why)` to the actions' broad `except` blocks so their failures show in tool health.
 - Handle the Live server's GoAway, the remaining 1008 cause: it arrives before the session-duration limit, and today the server closes with "client failed to close the connection after receiving a GoAway signal". Reconnect with the resumption handle when `go_away` arrives.
+- First 1008 timings: the GoAway one at 594 s into a session (the duration limit), and "operation aborted" 152 s after the last `audio_stream_end` with nothing sent since (asleep).
 - 1008 "The operation was aborted" is back. On 2026-10-15 there were six in one session, each after an `audio_stream_end` (asleep, after an announcement while asleep, and twice in a row straight after connecting asleep), plus one 1011 keepalive timeout. The Recv error line now prints the seconds since connecting and since the last `audio_stream_end`. Collect those figures before changing the stream-end logic.
 - Muting the mic while awake also stops the stream without `audio_stream_end` — watch for 1008s after answers while muted.
 - Monitor choice for `screen_process` — deferred; the plan is in `progress.md` → Fork backlog.

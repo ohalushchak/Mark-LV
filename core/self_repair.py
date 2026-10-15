@@ -156,6 +156,7 @@ class Repair:
 
 _lock = threading.Lock()
 _pending: dict | None = None
+_dropped: dict | None = None        # the question the user declined with ✕
 _current: Repair | None = None
 _loaded = False
 _cancel = threading.Event()
@@ -489,7 +490,7 @@ def _pick_error(error_id: str) -> dict | None:
 
 
 def ask(kind: str, task: str = "", error_id: str = "", player=None) -> str:
-    global _pending
+    global _pending, _dropped
     why = available() or _busy()
     if why:
         return why
@@ -526,6 +527,7 @@ def ask(kind: str, task: str = "", error_id: str = "", player=None) -> str:
         return refused
     dirty = [l[3:] for l in _git("status", "--porcelain", "--untracked-files=no").splitlines() if l]
     with _lock:
+        _dropped = None
         _pending = {"kind": kind, "task": summary, "prompt": prompt, "fingerprint": fp,
                     "error_id": err["id"] if err else "", "asked_at": time.monotonic(),
                     "dirty": dirty}
@@ -553,6 +555,12 @@ def run(details: str = "", player=None, by_button: bool = False) -> str:
     if p is None or time.monotonic() - p["asked_at"] > ASK_TTL:
         with _lock:
             _pending = None
+        d = _dropped
+        if d is not None and time.monotonic() - d["asked_at"] < ASK_TTL:
+            # Seen live: after ✕ the model's run read "nothing is waiting",
+            # asked again on its own and then said it had started.
+            return (f"[DECLINED] The user declined '{d['task'][:100]}' with the ✕ button on the "
+                    f"HUD. Do not start it and do not ask again; acknowledge in a few words.")
         r = current()
         if r is not None and r.state in RUNNING:
             # Seen live: the user pressed START while the model was still
@@ -1005,9 +1013,9 @@ def pending() -> dict | None:
 
 
 def drop_pending() -> str:
-    global _pending
+    global _pending, _dropped
     with _lock:
-        had, _pending = _pending is not None, None
+        had, _dropped, _pending = _pending is not None, _pending, None
     _changed()
     return "Dropped; nothing was started." if had else "Nothing was waiting."
 
@@ -1027,8 +1035,8 @@ def state() -> dict:
 
 def reset() -> None:
     """Tests only."""
-    global _pending, _current, _loaded
+    global _pending, _current, _loaded, _dropped
     with _lock:
-        _pending, _current, _loaded = None, None, True
+        _pending, _current, _loaded, _dropped = None, None, True, None
     _cancel.clear()
     _ui.update(review=None, restart=None)

@@ -246,7 +246,7 @@ def test_watchdog_rolls_back_a_change_that_breaks_startup(repo, tmp_path):
     state.mkdir()
     (state / "applied.json").write_text(json.dumps({"base": base, "commit": commit}))
     out = restart_helper.watch([sys.executable, "-c", "import sys; sys.exit(3)"],
-                               str(repo), state, watch_s=20)
+                               str(repo), state, watch_s=20, new_console=False)
     assert out == "rolled back"
     assert _git(repo, "rev-parse", "HEAD") == base
     note = json.loads((state / "rolled_back.json").read_text())
@@ -260,7 +260,7 @@ def test_watchdog_stops_once_the_new_instance_is_up(repo, tmp_path):
     code = (f"import pathlib, time; pathlib.Path({marker!r}).write_text('1'); "
             f"time.sleep(1)")
     assert restart_helper.watch([sys.executable, "-c", code], str(repo), state,
-                                watch_s=20) == "started"
+                                watch_s=20, new_console=False) == "started"
 
 
 def test_startup_note_reports_a_rollback(repo):
@@ -284,7 +284,7 @@ def test_a_question_can_be_dropped(repo):
     sr.ask("improve", task="make add add")
     assert sr.drop_pending().startswith("Dropped")
     assert sr.state()["state"] == "idle"
-    assert "Nothing is waiting" in sr.run(by_button=True)
+    assert sr.run(by_button=True).startswith("[DECLINED]")
 
 
 
@@ -341,3 +341,21 @@ def test_the_last_applied_change_can_be_taken_back_after_a_restart(repo, monkeyp
     assert out.startswith("[REVERTED]") and _git(repo, "rev-parse", "HEAD") == base
     assert sr.current().state == "applied" and sr.current().restart_offered
     assert sr.revert_last() == "No applied self-repair is left to take back."
+
+
+
+def test_after_the_x_button_run_says_the_user_declined(repo):
+    sr.ask("improve", task="make add add")
+    sr.drop_pending()
+    out = sr.run()
+    assert out.startswith("[DECLINED]") and "do not ask again" in out
+    sr.ask("improve", task="make add add")          # asking again clears it
+    assert not sr.run().startswith("[DECLINED]")
+
+
+def test_delegate_status_points_a_self_repair_job_to_self_improve(monkeypatch):
+    j = agents.Job(engine="claude", task="Self-repair: x", cwd=".", done=True, ok=True,
+                   on_done=lambda job: None)
+    monkeypatch.setattr(agents, "_job", j)
+    out = agents.status()
+    assert "self-repair of JARVIS's own code" in out and "self_improve" in out

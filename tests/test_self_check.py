@@ -110,3 +110,22 @@ def test_missing_packages_come_with_a_command_that_works_anywhere(monkeypatch, t
     ok, detail = capabilities._check_requirements()
     assert not ok and "python -m pip install -U surely-not-installed-pkg" in detail
     assert "setup.py" not in detail
+
+
+
+def test_console_output_is_copied_to_the_log(tmp_path, monkeypatch):
+    import sys
+    from core import console_log
+    monkeypatch.setattr(console_log, "DIR", tmp_path)
+    monkeypatch.setattr(console_log, "FILE", tmp_path / "console.log")
+    (tmp_path / "console.log").write_text("previous run\n", encoding="utf-8")
+    out, err = sys.stdout, sys.stderr
+    try:
+        assert console_log.install() == tmp_path / "console.log"
+        print("[JARVIS] hello 💬")
+        sys.stderr.write("Traceback: boom\n")
+    finally:
+        sys.stdout, sys.stderr = out, err
+    text = (tmp_path / "console.log").read_text(encoding="utf-8")
+    assert "=== JARVIS started" in text and "hello 💬" in text and "Traceback: boom" in text
+    assert (tmp_path / "console.log.1").read_text(encoding="utf-8") == "previous run\n"

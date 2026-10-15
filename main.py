@@ -83,6 +83,7 @@ from core                      import activity
 from core                      import announce as announcer
 from core                      import health
 from core                      import capabilities
+from core                      import console_log
 from core                      import self_repair
 from core                      import tool_args
 from core.action_loader        import NO_RESULT
@@ -1526,7 +1527,8 @@ class JarvisLive:
             except Exception as e:
                 self.ui.write_log(f"ERR: Restart failed — {e}")
                 return
-            print("[UI] Quitting — restart", flush=True)
+            print("[UI] Quitting — restart. JARVIS continues in a new console window; "
+                  f"its log is {console_log.FILE}", flush=True)
             import os as _os
             _os._exit(0)
 
@@ -3195,6 +3197,7 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
+    console_log.install()
     health.install_hooks()
     ui = JarvisUI("face.png")
 

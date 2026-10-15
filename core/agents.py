@@ -663,6 +663,12 @@ def status() -> str:
     j = job()
     if j is None:
         return "No agent has been given a task this session."
+    if j.on_done is not None:
+        # Seen live: the model asked delegate_to_agent about a self-repair run,
+        # read it as a job in the current project and named the wrong project.
+        return (f"The agent's last job was a self-repair of JARVIS's own code ({j.task[:120]}), "
+                f"not a task in the user's project. Use self_improve with action='status' "
+                f"or 'review' for it.")
     if not j.done:
         latest = f" Latest step: {j.last_step}." if j.last_step else ""
         return (f"{LABEL[j.engine]} is still working on: {j.task[:120]}. "

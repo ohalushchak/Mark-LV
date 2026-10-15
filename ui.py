@@ -502,6 +502,13 @@ class _SysMetrics:
 
 _metrics = _SysMetrics()
 
+# The coding agents' own colours on the HUD: fixed, and away from the hues the
+# assistant's states use (green listening, amber thinking, cyan idle), so "an
+# agent is working" never reads as one of them.
+AGENT_COLOURS = {"claude": "#E8825B", "codex": "#9B86FF"}
+AGENT_FLASH_S = 4.0       # how long the done / stopped ring stays after a job
+
+
 class HudCanvas(QWidget):
     def __init__(self, face_path: str, assistant_name: str = "J.A.R.V.I.S", parent=None):
         super().__init__(parent)
@@ -580,6 +587,13 @@ class HudCanvas(QWidget):
         self._vis_i = None        # first schedule frame not yet handed to the mouth
         self._base_scale = 1.0    # slow "breathing" target; amp is added per-frame
         self._base_halo  = 55.0
+
+        # A coding agent at work (core/agents.py, core/self_repair.py): the user
+        # asked why nothing tells them to keep waiting. Polled twice a second in
+        # _step; drawn as a ring around the centrepiece by _paint_agent.
+        self._agent: dict | None = None     # {"engine", "label", "since", "kind"}
+        self._agent_flash: tuple | None = None   # (until, colour hex, label)
+        self._agent_poll = 0
 
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
@@ -769,6 +783,11 @@ class HudCanvas(QWidget):
             self._scale += (self._tgt_scale - self._scale) * sp
             self._halo  += (self._tgt_halo  - self._halo)  * sp
 
+        self._agent_poll += 1
+        if self._agent_poll >= 30:              # ~0.5 s at the 60 Hz step
+            self._agent_poll = 0
+            self._poll_agent()
+
         self._blink_tick += 1
         if self._blink_tick >= 38:
             self._blink = not self._blink
@@ -785,7 +804,8 @@ class HudCanvas(QWidget):
         # either way because the animation state keeps stepping at 60 Hz.
         self._paint_tick = (self._paint_tick + 1) % 6
         active = (self.speaking or amp > 0.02
-                  or self.state in ("THINKING", "PROCESSING"))
+                  or self.state in ("THINKING", "PROCESSING")
+                  or self._agent is not None or self._agent_flash is not None)
         if _blinked or (self._paint_tick % 2 == 0 if active
                         else self._paint_tick % 3 == 0):
             # Nothing is on screen when the window is hidden or minimised, so
@@ -794,6 +814,96 @@ class HudCanvas(QWidget):
             # so it picks up mid-motion instead of snapping when you come back.
             if self._on_screen():
                 self.update()
+
+    def _poll_agent(self) -> None:
+        """Whether a coding agent is working, read from the modules that own
+        the jobs. A self-repair counts from its first test run to its last,
+        because the user is waiting through those too."""
+        try:
+            from core import agents, self_repair
+            j = agents.job()
+            sr = self_repair.state()
+        except Exception:
+            return
+        running = j is not None and not j.done
+        phase = sr.get("state")
+        now = time.time()
+        if phase in ("preparing", "agent", "testing"):
+            engine = j.engine if running else agents.current()["engine"]
+            label = "SELF-REPAIR · " + str(sr.get("step") or phase).upper()
+            kind = "repair"
+        elif running:
+            engine, kind = j.engine, "job"
+            label = f"{agents.LABEL.get(engine, engine).upper()} WORKING"
+        else:
+            engine = label = kind = None
+        prev = self._agent
+        if label is None:
+            if prev is not None:
+                # Just finished: a short ring in green or red says how.
+                ok = (sr.get("state") in ("review", "applied") if prev["kind"] == "repair"
+                      else bool(j is not None and j.ok))
+                name = ("SELF-REPAIR" if prev["kind"] == "repair"
+                        else agents.LABEL.get(prev["engine"], prev["engine"]).upper())
+                self._agent_flash = (now + AGENT_FLASH_S, C.GREEN if ok else C.RED,
+                                     f"✓  {name} DONE" if ok else f"✗  {name} STOPPED")
+            self._agent = None
+        else:
+            since = prev["since"] if prev is not None and prev["kind"] == kind else now
+            self._agent = {"engine": engine, "label": label[:52], "since": since,
+                           "kind": kind}
+            self._agent_flash = None
+        if self._agent_flash is not None and now > self._agent_flash[0]:
+            self._agent_flash = None
+
+    def _paint_agent(self, p: QPainter, cx: float, cy: float, r: float, W: float) -> None:
+        """A turning, pulsing ring in the agent's colour with a comet running
+        round it, and what it is doing at the top of the canvas."""
+        a, flash = self._agent, self._agent_flash
+        if a is None and flash is None:
+            return
+        rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        t = self._core_phase
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if a is not None:
+            col = QColor(AGENT_COLOURS.get(a["engine"], C.ACC))
+            pulse = 0.70 + 0.25 * math.sin(t * 2.4)
+            glow = QColor(col)
+            glow.setAlphaF(0.10 + 0.06 * math.sin(t * 2.4))
+            p.setPen(QPen(glow, 10.0))
+            p.drawEllipse(rect)
+            n, rot = 30, (t * 35.0) % 360.0
+            seg = 360.0 / n
+            for i in range(n):
+                c = QColor(col)
+                c.setAlphaF(max(0.05, min(1.0, pulse * (0.45 + 0.55 * i / n))))
+                pen = QPen(c, 3.2)
+                pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+                p.setPen(pen)
+                p.drawArc(rect, int((rot + i * seg) * 16), int(seg * 0.55 * 16))
+            ang = -t * 1.9                      # the comet runs the other way
+            for k in range(8):
+                c = QColor(col)
+                c.setAlphaF(max(0.0, 0.95 - k * 0.12))
+                x = cx + r * math.cos(ang + k * 0.07)
+                y = cy + r * math.sin(ang + k * 0.07)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(c)
+                p.drawEllipse(QPointF(x, y), max(1.2, 4.2 - k * 0.4), max(1.2, 4.2 - k * 0.4))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            secs = int(time.time() - a["since"])
+            text = f"◌  {a['label']}  ·  {secs // 60}:{secs % 60:02d}"
+        else:
+            until, hexcol, text = flash
+            col = QColor(hexcol)
+            c = QColor(col)
+            c.setAlphaF(max(0.0, min(1.0, (until - time.time()) / AGENT_FLASH_S)))
+            p.setPen(QPen(c, 3.0))
+            p.drawEllipse(rect)
+            col = c
+        p.setPen(QPen(col, 1))
+        p.setFont(_font(8.5, QFont.Weight.Bold))
+        p.drawText(QRectF(0, 2, W, 18), Qt.AlignmentFlag.AlignCenter, text)
 
     def can_show(self, style: str) -> bool:
         """Whether this canvas can draw `style` — a centrepiece whose module
@@ -1044,6 +1154,11 @@ class HudCanvas(QWidget):
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
             _r = min(W * 0.46, _band_h / 2.0)
             self._paint_core(p, cx, _band_t + _band_h / 2.0, _r, W, _band_h)
+
+        # a coding agent at work — around whichever centrepiece is drawn
+        _band_h = max(60.0, _sy_status - 24.0)
+        self._paint_agent(p, cx, 12.0 + _band_h / 2.0,
+                          max(30.0, min(_band_h / 2.0 - 2.0, W / 2.0 - 10.0)), W)
 
         # status text
         sy = _sy_status
