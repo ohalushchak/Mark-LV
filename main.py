@@ -79,6 +79,9 @@ from core                     import gemini as _gemini
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
+from core                      import activity
+from core                      import announce as announcer
+from core.agent_relay          import Relay as AgentRelay
 from core                      import audio_devices
 from core.action_loader        import discover_actions
 from core.barge_in             import BargeIn
@@ -738,6 +741,10 @@ class JarvisLive:
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
+        announcer.on_new(self._on_announcement)
+        # Outlives reconnects: a permission request held back for its 15 s
+        # must not be forgotten because the Live session was rebuilt.
+        self._agent_relay = AgentRelay()
 
         # ── Wake word ────────────────────────────────────────────────────────
         # _awake gates the mic (see _listen_audio) and the background speakers.
@@ -878,6 +885,12 @@ class JarvisLive:
         hear it. Nothing is streamed."""
         self._mic_seq += 1
         self._wake_ring.append((self._mic_seq, indata.tobytes(), True))
+        with self._speaking_lock:
+            speaking = self._is_speaking
+        if speaking or self._tail_active():
+            # An announcement is being spoken while asleep: its own words
+            # must not count as the wake phrase.
+            return
         det = self._wake_detector
         if det is not None:
             det.feed(indata, self._mic_seq)
@@ -906,6 +919,32 @@ class JarvisLive:
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
         self.ui.write_log(f"SYS: Sleeping — {reason}. Say '{self._wake_label}' to wake me.")
+        self._end_audio_stream("asleep")
+
+    def _end_audio_stream(self, why: str) -> None:
+        """Tell the server the microphone has stopped (Live API
+        `audio_stream_end`, meant for automatic activity detection, which is
+        on). Any thread.
+
+        Without it the server waits for audio that never comes. Asleep, the mic
+        streams nothing, and every announcement spoken while asleep was
+        followed a few seconds later by 1008 "The operation was aborted"; the
+        resumed session then failed the same way and its handle was rejected,
+        losing the conversation (four times in one test on 2026-10-15)."""
+        loop, session = getattr(self, "_loop", None), getattr(self, "session", None)
+        if not loop or not session:
+            return
+
+        async def go():
+            try:
+                await session.send_realtime_input(audio_stream_end=True)
+                print(f"[JARVIS] 🔇 Audio stream end sent ({why})")
+            except Exception as e:
+                print(f"[JARVIS] ⚠️ Audio stream end failed: {e}")
+        try:
+            asyncio.run_coroutine_threadsafe(go(), loop)
+        except Exception:
+            pass
 
     def _sleep_due(self, now: float) -> str | None:
         """Why the assistant should fall asleep now, or None to stay awake.
@@ -958,6 +997,9 @@ class JarvisLive:
         self._answer_ended_at = time.monotonic()
         if self._sleep_requested and not self._generation_open():
             self.sleep(reason="you asked me to")
+        elif self._wake_enabled and not self._awake and not self._generation_open():
+            # An announcement spoken while asleep: the mic stays closed.
+            self._end_audio_stream("announcement while asleep")
 
     # ── Wake word: UI callbacks (called from the Qt thread) ──────────────────
 
@@ -1104,6 +1146,7 @@ class JarvisLive:
         # room. Refusing it used to make the F9 quick prompt look dead: the
         # "I'm asleep" note went to a log that compact mode keeps hidden.
         # wake() is queued first, so it runs on the loop before the send.
+        activity.note_user_input()
         if self._wake_enabled and not self._awake:
             self._loop.call_soon_threadsafe(self.wake, "typed command")
         asyncio.run_coroutine_threadsafe(
@@ -1122,6 +1165,7 @@ class JarvisLive:
         with self._speaking_lock:
             was = self._is_speaking
             self._is_speaking = value
+        activity.set_speaking(value)
         if value:
             self._tail_until = 0.0
             if not was:
@@ -1158,6 +1202,8 @@ class JarvisLive:
             self._out_level = 0.0
         if value:
             self.ui.set_state("SPEAKING")
+        elif getattr(self, "_wake_enabled", False) and not getattr(self, "_awake", True):
+            self.ui.set_state("SLEEPING")      # an announcement made while asleep
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
 
@@ -2099,6 +2145,7 @@ class JarvisLive:
                             if txt:
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
+                                activity.note_user_input()
                                 if self._barge_hold is not None and _has_words(txt):
                                     self._commit_barge_in(f"heard: {txt[:40]!r}")
 
@@ -2140,8 +2187,11 @@ class JarvisLive:
                             # same answer (or a tail of it) twice in a row.
                             if full_out and len(full_out) >= _REPEAT_MIN and self._last_out_logged:
                                 if full_out in self._last_out_logged:
+                                    print(f"[JARVIS] 💬 (a repeat of the last answer, "
+                                          f"not logged): {full_out[:80]}")
                                     full_out = ""
                             if full_out:
+                                print(f"[JARVIS] 💬 {full_out[:160]}")
                                 self._last_out_logged = full_out
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
                                 self._session_log.append(f"{self._asst_name}: {full_out}")
@@ -2563,6 +2613,98 @@ class JarvisLive:
             except Exception as e:
                 print(f"[Monitor] ⚠️ Could not send alert: {e}")
 
+    # ── Announcer: results that arrive after the conversation moved on ──────────
+
+    async def _run_announcer(self) -> None:
+        """Speak what core/announce.py has queued — a finished background
+        command, a confirmed push, an agent's report — once the room is quiet.
+
+        Never over the assistant or the user, never mid-answer or mid-tool.
+        Asleep, it still speaks — the user wants agent news by voice, not as a
+        tray notification — but as one sentence with nothing asked, and it
+        stays asleep (set_speaking restores SLEEPING; _mic_asleep keeps the
+        wake detector off its own voice). An item that cannot be said within a
+        minute goes to the tray instead."""
+        session, since = None, 0.0
+        while True:
+            await asyncio.sleep(1.0)
+            if self.session is not session:
+                # A fresh (re)connection: give the session a few seconds to
+                # settle. The first announcement that was heard twice had been
+                # sent within a second of connecting.
+                session, since = self.session, time.monotonic()
+            if time.monotonic() - since < 3.0:
+                continue
+            for item in announcer.overdue(60.0):
+                if item.note:
+                    try:
+                        self.ui.notify(item.note)
+                    except Exception:
+                        pass
+            if not self.session or not announcer.pending():
+                continue
+            with self._speaking_lock:
+                speaking = self._is_speaking
+            if (speaking or self._generation_open() or self._tool_turn_open
+                    or self._vision_busy or self._barge_hold is not None
+                    or (self._ptt_enabled and self._ptt_held)
+                    or time.monotonic() - self._last_user_speech < 4.0):
+                continue
+            items = announcer.take()
+            if not items:
+                continue
+            # Framed as news to pass on, never as something the user asked:
+            # an earlier "[WHILE_ASLEEP] You are asleep…" prefix was taken as a
+            # request, and the assistant opened each announcement with "I am
+            # asleep, so I cannot do what you asked".
+            text = ("[NOTIFICATION] Not a request from the user: news for you to pass "
+                    "on. Say it in one or two short sentences in the user's language "
+                    "and stop. Do not answer it as a request, ask nothing, call no "
+                    "tools, and do not mention being asleep or awake.\n\n"
+                    + announcer.combine(items))
+            try:
+                await self.session.send_client_content(
+                    turns={"role": "user", "parts": [{"text": text}]},
+                    turn_complete=True,
+                )
+                print(f"[Announce] 🗣 {len(items)} item(s): "
+                      f"{'; '.join(i.note or i.text[:40] for i in items)}")
+            except Exception as e:
+                print(f"[Announce] ⚠️ Could not send: {e}")
+                for i in items:      # keep them for the next quiet moment
+                    announcer.say(i.text, note=i.note, key=i.key, max_age=i.max_age)
+
+    async def _run_agent_relay(self) -> None:
+        """The user's own Claude Code / Codex sessions, through the hook in
+        core/agent_hook.py: finished turns and permission prompts become
+        announcements. Off unless switched on in CONTROLS."""
+        from memory.config_manager import get_agent_settings
+        while True:
+            await asyncio.sleep(2.0)
+            try:
+                s = get_agent_settings()
+                if not s["relay_enabled"]:
+                    continue
+                self._agent_relay.min_turn_s = s["relay_min_turn_s"]
+                due = await asyncio.to_thread(self._agent_relay.check)
+            except Exception as e:
+                print(f"[Relay] ⚠️ {e}")
+                continue
+            for text, note, key in due:
+                print(f"[Relay] 📥 {note}")
+                announcer.say(text, note=note, key=key, max_age=600)
+
+    def _on_announcement(self, item) -> None:
+        """A result was queued (any thread). Commands and agents log their own
+        outcome; a relay event has no other trace in the activity log, so it
+        gets one here. It is spoken by _run_announcer; the tray only gets what
+        stays unsaid."""
+        if item.note and item.key.startswith("relay:"):
+            try:
+                self.ui.write_log(f"SYS: 🔔 {item.note}")
+            except Exception:
+                pass
+
     # ── Background monitor ──────────────────────────────────────────────────────
 
     async def _run_background_monitor(self) -> None:
@@ -2797,6 +2939,8 @@ class JarvisLive:
                         self.ui.set_state("SLEEPING")
                         self.ui.write_log(f"SYS: {self._asst_name} online — sleeping. "
                                           f"Say '{self._wake_label}' to wake me.")
+                        # A resumed session may still be waiting for audio.
+                        self._end_audio_stream("connected asleep")
                     else:
                         self._awake = True
                         if self._wants_wake_detector() and wake_is_ready() and not (
@@ -2818,6 +2962,8 @@ class JarvisLive:
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
+                    tg.create_task(self._run_announcer())
+                    tg.create_task(self._run_agent_relay())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 

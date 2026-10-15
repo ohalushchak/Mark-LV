@@ -19,6 +19,12 @@ Technologies, environment and constraints. Exact package versions live in `requi
 - Global push-to-talk works only on Windows (`GetAsyncKeyState`); elsewhere it is window-scoped.
 - The sherpa KWS model is English-only: Ukrainian names are transliterated (`core/wake_engines/translit.py`) or typed as "sounds like". The small Ukrainian Vosk model supports grammars, knows common names (марко, олена, богдан) but not "джарвіс".
 - Picovoice Porcupine is not an option: its free tier ended on 2026-06-30.
+- Coding agents on this machine: Claude Code 2.1.300 (`~/.local/bin/claude`, Max plan) and Codex CLI 0.156 (npm, ChatGPT Plus sign-in). Claude Code takes `--permission-mode auto --permission-prompts none` and `--effort low…max`; its headless stream carries a `rate_limit_event` with the 5-hour and weekly utilization — there is no free way to read them otherwise. Codex's app-server answers `model/list` and `account/rateLimits/read` in ~0.3 s at no cost. `codex exec resume` accepts neither `--sandbox` nor `-C` (the sandbox goes in as `-c sandbox_mode=…`).
+- Codex's own `config.toml` names `gpt-6.1-sol`, which the ChatGPT sign-in refuses ("not supported when using Codex with a ChatGPT account"); the agent passes the app-server's default model explicitly instead.
+- Codex's Windows sandbox writes files as a sandbox user. In a folder whose ACL grants only OWNER RIGHTS (Python's `tempfile.mkdtemp`), the user cannot read those files; normal project folders inherit usable ACLs.
+- Both CLIs support the hook events `UserPromptSubmit`, `Stop` (with `last_assistant_message`) and `PermissionRequest`, in the same JSON format.
+- PowerShell 7 is installed (`pwsh`); `run_command` uses it, falling back to Windows PowerShell.
+- `time.monotonic()` on Windows ticks every ~16 ms: tests that order two events need a ≥50 ms gap.
 
 ## Constraints
 

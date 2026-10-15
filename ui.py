@@ -51,7 +51,7 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSlider,
     QSpinBox, QSplitter,
     QGraphicsScene, QGraphicsView,
@@ -1383,6 +1383,10 @@ class CompactCard(QWidget):
         self._state = QLabel("● LISTENING")
         self._state.setFont(_font(8.5, QFont.Weight.Bold))
         col.addWidget(self._state)
+        self._agent = QLabel("")
+        self._agent.setFont(_font(7.5, QFont.Weight.Bold))
+        self._agent.hide()
+        col.addWidget(self._agent)
         col.addStretch()
         top.addLayout(col, stretch=1)
         lay.addLayout(top)
@@ -1441,6 +1445,14 @@ class CompactCard(QWidget):
     def set_name(self, name: str) -> None:
         self._name.setText((name or "JARVIS").upper())
         self.caption.set_assistant_name(name)
+
+    def set_agent_line(self, text: str) -> None:
+        """'● Claude Code working · 4 min' while a coding agent runs; hidden
+        otherwise. The card is often all that is on screen during a long job."""
+        if text:
+            self._agent.setText(text)
+            self._agent.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+        self._agent.setVisible(bool(text))
 
     def refresh_state(self) -> None:
         hud = self._owner.hud
@@ -1630,6 +1642,15 @@ class JarvisTray:
         self.menu.addSeparator()
         self._mute = self.menu.addAction("🎙  Mute microphone", owner._toggle_mute)
         self._mute.setCheckable(True)
+        agent_menu = self.menu.addMenu("🤖  Coding agent")
+        self._agent_usage = agent_menu.addAction("")
+        self._agent_usage.setEnabled(False)
+        agent_menu.addSeparator()
+        self._agent_engines = {}
+        for key, label in (("claude", "Claude Code"), ("codex", "Codex")):
+            a = agent_menu.addAction(label, lambda k=key: owner._agent_panel.pick(k))
+            a.setCheckable(True)
+            self._agent_engines[key] = a
         orb_menu = self.menu.addMenu("🔵  Desktop orb")
         self._orb_modes = {}
         for mode, label in (("off", "Off"), ("speaking", "While speaking"),
@@ -1737,6 +1758,18 @@ class JarvisTray:
             a.setChecked(m == mode)
         hk = getattr(o, "_quick_prompt_key_label", "")
         self._prompt.setText("⌨  Quick prompt" + (f"   [{hk}]" if hk else ""))
+        try:
+            from core import agents
+            eng = agents.current()["engine"]
+            for k, a in self._agent_engines.items():
+                a.setChecked(k == eng)
+            u = agents.usage(eng)
+            bits = [f"{n} {u[k]['pct']:.0f}%" for k, n in (("five_hour", "5h"), ("week", "week"))
+                    if u.get(k)]
+            self._agent_usage.setText(f"{agents.LABEL[eng]}: "
+                                      + (" · ".join(bits) if bits else "limits not known yet"))
+        except Exception:
+            pass
 
     def _toggle_compact(self) -> None:
         if self._owner._compact.isVisible():
@@ -1862,6 +1895,8 @@ class QuickPrompt(QWidget):
 
 class MetricBar(QWidget):
 
+    _WARN, _HOT = 65, 85     # % at which the bar turns amber, then red
+
     def __init__(self, label: str, color: str = "PRI", parent=None):
         """`color` is a palette key ("PRI", "GREEN"…), looked up at paint time
         so a live theme switch reaches the bar; a hex string stays fixed."""
@@ -1902,9 +1937,9 @@ class MetricBar(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), 2, 2)
 
-        if self._value > 85:
+        if self._value >= self._HOT:
             bar_col = qcol(C.RED)
-        elif self._value > 65:
+        elif self._value >= self._WARN:
             bar_col = qcol(C.ACC)
         else:
             bar_col = qcol(getattr(C, self._color, self._color))
@@ -1922,6 +1957,414 @@ class MetricBar(QWidget):
         p.drawText(QRectF(0, 4, W - 6, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self._text)
 
         p.end()
+
+class UsageBar(MetricBar):
+    """One usage window of a coding agent: percent used and when it resets.
+    Amber from 75 %, red from 90 % — the point where starting a long job is
+    worth a second thought."""
+
+    _WARN, _HOT = 75, 90
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(label, "GREEN", parent)
+        self.setFixedHeight(34)
+        self.setMinimumWidth(60)
+
+
+class AgentPanel(QWidget):
+    """The coding agent at a glance: Claude Code or Codex, its model and effort,
+    how much of its plan is left, and the job it is working on.
+
+    Everything here mirrors core/agents.py, which owns the settings; the panel
+    only reads its state and calls its setters. Anything that may block — the
+    Codex app-server for models and limits, Claude's limit request — runs on a
+    worker thread and comes back through a signal.
+    """
+
+    _changed_sig = pyqtSignal()          # core.agents changed (any thread)
+    _models_sig = pyqtSignal()           # a model list finished loading
+    _CODEX_POLL_MS = 5 * 60 * 1000       # Codex limits are free to read
+
+    def __init__(self, owner):
+        super().__init__()
+        from core import agents
+        self._agents = agents
+        self._owner = owner
+        self._models: dict[str, list] = {"claude": agents.models("claude")}
+        self._loading: set[str] = set()
+        self._refreshing = False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        top = QHBoxLayout()
+        self._title = QLabel("▸ AGENT")
+        self._title.setFont(_font(7, QFont.Weight.Bold))
+        top.addWidget(self._title)
+        top.addStretch()
+        self._project = QLabel("")
+        self._project.setFont(_font(7))
+        self._project.setToolTip("The current project: where the agent, commands and git work.")
+        top.addWidget(self._project)
+        lay.addLayout(top)
+
+        eng = QHBoxLayout()
+        eng.setSpacing(6)
+        self._eng_btns = {}
+        for key, text in (("claude", "CLAUDE CODE"), ("codex", "CODEX")):
+            b = QPushButton(text)
+            b.setFixedHeight(24)
+            b.setFont(_font(7.5, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, k=key: self.pick(k))
+            eng.addWidget(b)
+            self._eng_btns[key] = b
+        lay.addLayout(eng)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(3)
+        self._model_cb = QComboBox()
+        self._effort_cb = QComboBox()
+        for row, (cap, cb) in enumerate((("MODEL", self._model_cb),
+                                         ("EFFORT", self._effort_cb))):
+            lbl = QLabel(cap)
+            lbl.setFont(_font(7, QFont.Weight.Bold))
+            lbl.setObjectName("agentCap")
+            grid.addWidget(lbl, row, 0)
+            cb.setFont(_font(7.5))
+            cb.setFixedHeight(22)
+            cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            grid.addWidget(cb, row, 1)
+        grid.setColumnStretch(1, 1)
+        self._model_cb.activated.connect(self._on_model)
+        self._effort_cb.activated.connect(self._on_effort)
+        lay.addLayout(grid)
+
+        bars = QHBoxLayout()
+        bars.setSpacing(6)
+        self._bar_5h = UsageBar("5 HOURS")
+        self._bar_week = UsageBar("WEEK")
+        bars.addWidget(self._bar_5h)
+        bars.addWidget(self._bar_week)
+        lay.addLayout(bars)
+
+        meta = QHBoxLayout()
+        self._updated = QLabel("")
+        self._updated.setFont(_font(6.5))
+        meta.addWidget(self._updated, stretch=1)
+        self._refresh_btn = QPushButton("↻")
+        self._refresh_btn.setFixedSize(26, 18)
+        self._refresh_btn.setFont(_font(8, QFont.Weight.Bold))
+        self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_btn.clicked.connect(self.refresh_usage)
+        meta.addWidget(self._refresh_btn)
+        lay.addLayout(meta)
+
+        self._job_box = QWidget()
+        self._job_box.setObjectName("agentJob")
+        # A plain QWidget paints no stylesheet background without this.
+        self._job_box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        jl = QVBoxLayout(self._job_box)
+        jl.setContentsMargins(6, 4, 6, 4)
+        jl.setSpacing(2)
+        self._job_lbl = QLabel("")
+        self._job_lbl.setFont(_font(7.5, QFont.Weight.Bold))
+        self._job_lbl.setWordWrap(True)
+        jl.addWidget(self._job_lbl)
+        jrow = QHBoxLayout()
+        self._step_lbl = QLabel("")
+        self._step_lbl.setFont(_font(7))
+        jrow.addWidget(self._step_lbl, stretch=1)
+        self._stop_btn = QPushButton("STOP")
+        self._stop_btn.setFixedSize(52, 20)
+        self._stop_btn.setFont(_font(7, QFont.Weight.Bold))
+        self._stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._stop_btn.setToolTip("Stop the agent. What it already changed stays changed.")
+        self._stop_btn.clicked.connect(self._stop)
+        jrow.addWidget(self._stop_btn)
+        jl.addLayout(jrow)
+        self._job_box.hide()
+        lay.addWidget(self._job_box)
+
+        self._pending_refresh = False
+        self._changed_sig.connect(self._schedule)
+        self._models_sig.connect(self.refresh)
+        agents.on_change(self._changed_sig.emit)
+
+        self._tick_tmr = QTimer(self)
+        self._tick_tmr.setInterval(2000)
+        self._tick_tmr.timeout.connect(self._tick)
+        self._tick_tmr.start()
+        self._poll_tmr = QTimer(self)
+        self._poll_tmr.setInterval(self._CODEX_POLL_MS)
+        self._poll_tmr.timeout.connect(lambda: self._bg_usage("codex", quiet=True))
+        self._poll_tmr.start()
+
+        self.restyle()
+        self._load_models("codex")
+        QTimer.singleShot(4000, lambda: self._bg_usage("codex", quiet=True))
+
+    # ── look ────────────────────────────────────────────────────────────────
+
+    def restyle(self) -> None:
+        self._title.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        self._project.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        self._updated.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        self._step_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        for lbl in self.findChildren(QLabel, "agentCap"):
+            lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        combo = (f"QComboBox {{ background: {C.DARK}; color: {C.TEXT}; "
+                 f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 1px 6px; }}"
+                 f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
+                 f"QComboBox QAbstractItemView {{ background: {C.DARK}; color: {C.TEXT}; "
+                 f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER}; }}")
+        self._model_cb.setStyleSheet(combo)
+        self._effort_cb.setStyleSheet(combo)
+        small = (f"QPushButton {{ background: transparent; color: {C.TEXT_MED}; "
+                 f"border: 1px solid {C.BORDER}; border-radius: 3px; }}"
+                 f"QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}")
+        self._refresh_btn.setStyleSheet(small)
+        self._stop_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {C.RED}; "
+            f"border: 1px solid {C.RED}; border-radius: 3px; }}"
+            f"QPushButton:hover {{ background: {_mix_hex(C.BG, C.RED, 0.18)}; }}")
+        self._job_box.setStyleSheet(
+            f"QWidget#agentJob {{ background: {C.PANEL2}; border: 1px solid {C.BORDER_A}; "
+            f"border-radius: 4px; }}")
+        self.refresh()
+
+    def _eng_style(self, on: bool) -> str:
+        if on:
+            return (f"QPushButton {{ background: {_mix_hex(C.BG, C.PRI, 0.16)}; color: {C.PRI}; "
+                    f"border: 1px solid {C.PRI}; border-radius: 3px; }}")
+        return (f"QPushButton {{ background: transparent; color: {C.TEXT_DIM}; "
+                f"border: 1px solid {C.BORDER}; border-radius: 3px; }}"
+                f"QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}")
+
+    # ── state → widgets ─────────────────────────────────────────────────────
+
+    def _schedule(self) -> None:
+        # Agents report every step; coalesce bursts into one repaint.
+        if not self._pending_refresh:
+            self._pending_refresh = True
+            QTimer.singleShot(150, self.refresh)
+
+    def _model_list(self, engine: str) -> list:
+        return self._models.get(engine) or []
+
+    def _efforts(self, engine: str, model_id: str) -> list[str]:
+        if engine == "claude":
+            return list(self._agents.CLAUDE_EFFORTS)
+        ms = self._model_list(engine)
+        m = next((x for x in ms if x.id == model_id), None) if model_id else \
+            next((x for x in ms if x.is_default), None)
+        return list(m.efforts) if m else []
+
+    def refresh(self) -> None:
+        self._pending_refresh = False
+        self._refreshing = True
+        try:
+            st = self._agents.state()
+        except Exception as e:
+            print(f"[AgentPanel] state failed: {e}")
+            self._refreshing = False
+            return
+        engine = st["engine"]
+        for key, b in self._eng_btns.items():
+            b.setStyleSheet(self._eng_style(key == engine))
+        label = self._agents.LABEL[engine]
+        self._eng_btns["claude"].setToolTip(
+            "Claude Code (claude -p) on your Claude plan. Click to use it for "
+            "delegated coding tasks.")
+        self._eng_btns["codex"].setToolTip(
+            "Codex (codex exec) on your ChatGPT plan, in its workspace sandbox. "
+            "Click to use it for delegated coding tasks.")
+
+        cb = self._model_cb
+        cb.blockSignals(True)
+        cb.clear()
+        default_name = ("Default (as set in Claude Code)" if engine == "claude"
+                        else "Default (the account's ★ model)")
+        ms = self._model_list(engine)
+        if engine in self._loading and not ms:
+            cb.addItem("loading models…", None)
+            cb.setEnabled(False)
+        else:
+            cb.setEnabled(True)
+            cb.addItem(default_name, "")
+            for m in ms:
+                cb.addItem(m.label + ("  ★" if m.is_default else ""), m.id)
+            idx = cb.findData(st["model"])
+            if idx < 0 and st["model"]:
+                cb.addItem(f"{st['model']} (unavailable)", st["model"])
+                idx = cb.count() - 1
+            cb.setCurrentIndex(max(0, idx))
+        cb.setToolTip("The model the agent runs on. ★ marks the CLI's own default.")
+        cb.blockSignals(False)
+
+        eb = self._effort_cb
+        eb.blockSignals(True)
+        eb.clear()
+        eb.addItem("Default", "")
+        costly = self._agents.COSTLY_EFFORTS
+        for e in self._efforts(engine, st["model"]):
+            eb.addItem(e + ("  ⚡" if e in costly else ""), e)
+        idx = eb.findData(st["effort"])
+        eb.setCurrentIndex(max(0, idx))
+        eb.setToolTip("How hard the agent thinks. ⚡ levels use the plan up much faster.")
+        eb.blockSignals(False)
+
+        self._show_usage(engine, st["usage"].get(engine) or {})
+        self._show_job(st.get("job"))
+        self._refreshing = False
+        try:
+            self._owner._tray.refresh()
+        except Exception:
+            pass
+
+    def _show_usage(self, engine: str, u: dict) -> None:
+        clock = self._agents._clock
+        for bar, key in ((self._bar_5h, "five_hour"), (self._bar_week, "week")):
+            w = u.get(key)
+            if w:
+                reset = clock(int(w.get("resets_at") or 0))
+                bar.set_value(float(w["pct"]), f"{w['pct']:.0f}%"
+                              + (f" ↻{reset}" if reset else ""))
+                bar.setToolTip(f"{w['pct']:.1f}% of this window used"
+                               + (f"; it resets at {reset}." if reset else "."))
+            else:
+                bar.set_value(0, "--")
+                bar.setToolTip("Not known yet — press ↻ to fetch it.")
+        self._usage = u
+        self._tick()
+        tip = ("Refresh the limits. For Claude Code this sends a one-word request to "
+               "haiku (a sliver of the plan); Codex reports them for free."
+               if engine == "claude" else "Refresh Codex's limits (free).")
+        self._refresh_btn.setToolTip(tip)
+
+    def _show_job(self, j) -> None:
+        if not j:
+            self._job_box.hide()
+            self._card_line("")
+            return
+        label = self._agents.LABEL[j["engine"]]
+        mins = j["minutes"]
+        elapsed = f"{mins * 60:.0f} s" if mins < 1.5 else f"{mins:.0f} min"
+        if not j["done"]:
+            self._job_lbl.setText(f"● {label}: {j['task'][:70]}")
+            self._job_lbl.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+            self._step_lbl.setText(f"{elapsed} · {j['steps']} steps"
+                                   + (f" · {j['last_step'][:40]}" if j["last_step"] else ""))
+            self._stop_btn.show()
+            self._card_line(f"● {label} working · {elapsed}")
+        else:
+            ok = j["ok"]
+            self._job_lbl.setText(f"{'✓' if ok else '✗'} {label}: {j['task'][:70]}")
+            self._job_lbl.setStyleSheet(
+                f"color: {C.GREEN if ok else C.RED}; background: transparent;")
+            self._step_lbl.setText(f"{'done' if ok else (j['killed'] or 'did not finish')}"
+                                   f" · {elapsed} · {j['steps']} steps")
+            self._stop_btn.hide()
+            self._card_line("")
+        self._job_box.show()
+
+    def _card_line(self, text: str) -> None:
+        card = getattr(self._owner, "_compact", None)
+        if card is not None and hasattr(card, "set_agent_line"):
+            card.set_agent_line(text)
+
+    def _tick(self) -> None:
+        try:
+            from core import projects
+            cur = projects.current()
+            self._project.setText(cur.name if cur else "no project")
+        except Exception:
+            pass
+        u = getattr(self, "_usage", {}) or {}
+        upd = float(u.get("updated") or 0)
+        if not upd:
+            self._updated.setText("limits not fetched yet")
+        else:
+            age = int(time.time() - upd) // 60
+            self._updated.setText("limits updated just now" if age < 1 else
+                                  f"limits updated {age} min ago")
+        j = self._agents.job()
+        if j is not None and not j.done:
+            self._show_job(self._agents.state().get("job"))
+
+    # ── user actions ────────────────────────────────────────────────────────
+
+    def pick(self, engine: str) -> None:
+        self._owner._log_sig.emit("SYS: " + self._agents.set_engine(engine))
+        if engine == "codex" and not self._model_list("codex"):
+            self._load_models("codex")
+
+    def _on_model(self, idx: int) -> None:
+        if self._refreshing:
+            return
+        model = self._model_cb.itemData(idx)
+        if model is None:
+            return
+        engine = self._agents.current()["engine"]
+        self._bg(lambda: self._agents.set_model(model, engine))
+
+    def _on_effort(self, idx: int) -> None:
+        if self._refreshing:
+            return
+        effort = self._effort_cb.itemData(idx)
+        if effort is None:
+            return
+        engine = self._agents.current()["engine"]
+        self._bg(lambda: self._agents.set_effort(effort, engine))
+
+    def _stop(self) -> None:
+        self._owner._log_sig.emit("SYS: " + self._agents.cancel())
+
+    def refresh_usage(self) -> None:
+        self._bg_usage(self._agents.current()["engine"], quiet=False)
+
+    # ── workers ─────────────────────────────────────────────────────────────
+
+    def _bg(self, fn) -> None:
+        def work():
+            try:
+                msg = fn()
+                if msg:
+                    self._owner._log_sig.emit(f"SYS: {msg}")
+            except Exception as e:
+                self._owner._log_sig.emit(f"ERR: agent settings — {e}")
+        threading.Thread(target=work, daemon=True, name="agent-settings").start()
+
+    def _bg_usage(self, engine: str, quiet: bool) -> None:
+        if not quiet:
+            self._updated.setText("fetching limits…")
+
+        def work():
+            try:
+                msg = self._agents.refresh_usage(engine)
+            except Exception as e:
+                msg = f"could not fetch the limits: {e}"
+            if not quiet:
+                self._owner._log_sig.emit(f"SYS: {msg}")
+            self._changed_sig.emit()
+        threading.Thread(target=work, daemon=True, name="agent-usage").start()
+
+    def _load_models(self, engine: str) -> None:
+        if engine in self._loading:
+            return
+        self._loading.add(engine)
+
+        def work():
+            try:
+                ms = self._agents.models(engine, refresh=True)
+            except Exception:
+                ms = []
+            self._models[engine] = ms
+            self._loading.discard(engine)
+            self._models_sig.emit()
+        threading.Thread(target=work, daemon=True, name="agent-models").start()
+
 
 class LogWidget(QTextEdit):
     _sig = pyqtSignal(str)
@@ -4196,11 +4639,13 @@ class MainWindow(QMainWindow):
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
     _video_open_sig  = pyqtSignal(str, str, bool, str)  # video, title, muted, audio
     _wake_btns_sig   = pyqtSignal()          # wake state resolved off-thread
+    _look_btns_sig   = pyqtSignal()          # a CONTROLS setting changed off-thread
     _video_close_sig = pyqtSignal()
     _video_mute_sig  = pyqtSignal(bool)
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _quick_prompt_sig = pyqtSignal()         # global hotkey thread → toggle the prompt
+    _notify_sig     = pyqtSignal(str)        # any thread → a tray notification
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
     _chime_sig      = pyqtSignal()           # woken by voice — play the system chime
@@ -4511,6 +4956,7 @@ class MainWindow(QMainWindow):
         self._quick_prompt_key_label = ""
         self._setup_quick_prompt_key(announce=False)
         self._tray = JarvisTray(self)
+        self._notify_sig.connect(self._show_notification)
         self._log_sig.connect(self._tray.show_line)
         QApplication.instance().aboutToQuit.connect(self._tray.hide)
         try:
@@ -4527,6 +4973,7 @@ class MainWindow(QMainWindow):
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._wake_btns_sig.connect(self._refresh_wake_btns)
+        self._look_btns_sig.connect(self._refresh_look_btns)
         self._video_open_sig.connect(self._on_video_open)
         self._video_close_sig.connect(self._on_video_close)
         self._video_mute_sig.connect(self._on_video_mute)
@@ -5418,6 +5865,13 @@ class MainWindow(QMainWindow):
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         lay.addWidget(sep)
 
+        self._agent_panel = AgentPanel(self)
+        lay.addWidget(self._agent_panel)
+
+        sep_a = QFrame(); sep_a.setFrameShape(QFrame.Shape.HLine)
+        sep_a.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        lay.addWidget(sep_a)
+
         lay.addWidget(_sec("FILE UPLOAD"))
         self._drop_zone = FileDropZone()
         self._drop_zone.file_selected.connect(self._on_file_selected)
@@ -5633,6 +6087,8 @@ class MainWindow(QMainWindow):
         self._desk_orb_btn.clicked.connect(self._toggle_desktop_orb)
         self._quick_key_btn = _row(QPushButton())
         self._quick_key_btn.clicked.connect(self._cycle_quick_prompt_key)
+        self._relay_btn = _row(QPushButton())
+        self._relay_btn.clicked.connect(self._toggle_agent_relay)
         self._refresh_look_btns()
 
         w.adjustSize()
@@ -6581,6 +7037,16 @@ class MainWindow(QMainWindow):
             "The key that opens a one-line prompt in the middle of the screen, "
             "from any app. Click to cycle: F9, Ctrl+Alt+J, off (F9 is also an "
             "IDE debugger key).")
+        from memory.config_manager import get_agent_settings
+        relay = get_agent_settings()["relay_enabled"]
+        self._relay_btn.setText(f"{'🔔' if relay else '🔕'}  AGENT SESSIONS: "
+                                f"{'ON' if relay else 'OFF'}")
+        self._relay_btn.setStyleSheet(style if relay else off_style)
+        self._relay_btn.setToolTip(
+            "Announce your own Claude Code and Codex sessions: a turn that ran "
+            "30 s or more has finished, or a session is waiting for your "
+            "permission. Adds a hook to ~/.claude/settings.json and "
+            "~/.codex/hooks.json (a backup is kept); turning it off removes it.")
         pct = int(round(get_ui_scale() * 100))
         self._scale_btn.setText(f"🔠  TEXT SIZE: {pct}%")
         self._scale_btn.setStyleSheet(style)
@@ -6607,6 +7073,7 @@ class MainWindow(QMainWindow):
         self._compact.restyle()
         self._tray.restyle()
         self._quick_prompt.restyle()
+        self._agent_panel.restyle()
         self._refresh_hud_btn()
         self._refresh_look_btns()
         self._log.append_log(f"SYS: Theme set to {want}.")
@@ -6638,6 +7105,20 @@ class MainWindow(QMainWindow):
                               "speaking": "SYS: Desktop orb shows while JARVIS speaks.",
                               "always": "SYS: Desktop orb always shows when this "
                                         "window is out of sight."}[want])
+
+    def _toggle_agent_relay(self):
+        from memory.config_manager import get_agent_settings
+        want = not get_agent_settings()["relay_enabled"]
+
+        def work():
+            try:
+                from core.agent_relay import install
+                msg = install(want)
+            except Exception as e:
+                msg = f"could not change the agent hooks: {e}"
+            self._log_sig.emit(f"SYS: {msg}")
+            self._look_btns_sig.emit()
+        threading.Thread(target=work, daemon=True, name="agent-relay").start()
 
     def _cycle_quick_prompt_key(self):
         from memory.config_manager import (QUICK_PROMPT_KEYS, get_quick_prompt_key,
@@ -7113,6 +7594,16 @@ class MainWindow(QMainWindow):
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
 
+    def _show_notification(self, text: str):
+        """A tray balloon — for news that cannot be spoken yet (asleep)."""
+        tray = getattr(self._tray, "tray", None)
+        if tray is not None and text:
+            try:
+                tray.showMessage(self._assistant_name, text[:200],
+                                 tray.MessageIcon.Information, 6000)
+            except Exception:
+                pass
+
     def toggle_quick_prompt(self):
         self._quick_prompt.toggle()
 
@@ -7489,6 +7980,10 @@ class JarvisUI:
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
+
+    def notify(self, text: str):
+        """Thread-safe: a tray notification."""
+        self._win._notify_sig.emit(str(text or ""))
 
     def wait_for_api_key(self):
         while not self._win._ready:
