@@ -95,7 +95,8 @@ def _probe(tests: bool, player) -> str:
         player.write_log(f"SYS: Self-check done — {bad} problem(s).")
     return (text + "\n\nTell the user the outcome in one or two short sentences: what "
             "is broken, if anything. Offer self_improve only for a code error, not for a "
-            "missing package, key or device — those the user fixes.")
+            "missing package, key or device — those the user fixes: tell them the install "
+            "command from the result; do not run installs yourself.")
 
 
 def self_check(parameters: dict, player=None) -> str:

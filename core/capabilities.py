@@ -121,7 +121,11 @@ def _check_requirements() -> tuple[bool, str]:
         parts.append("missing: " + ", ".join(missing))
     if outdated:
         parts.append("wrong version: " + ", ".join(outdated))
-    return False, "; ".join(parts) + " — run python setup.py"
+    # A command that works from any folder. Live, the model ran "python setup.py"
+    # in the current project, which has no setup.py.
+    names = missing + [o.split(" ")[0] for o in outdated]
+    return False, ("; ".join(parts) + " — the user installs them with: python -m pip "
+                   "install -U " + " ".join(names))
 
 
 def _check_git() -> tuple[bool, str]:

@@ -12,6 +12,11 @@ _Last updated: 2026-10-15_
   3. **Self-check:** `core/capabilities.py` and the `self_check` tool.
   4. **Self-repair:** `core/self_repair.py` and the `self_improve` tool, on top of `agents.start_owned`.
   5. **Review, apply, restart:** `ReviewOverlay` and `RepairPanel` in `ui.py`, `JarvisLive.restart_app`, `core/restart_helper.py`.
+- First live test, 2026-10-15: `self_check` status, errors and the yt-dlp finding worked. Self-repair never started:
+  - the model asked "shall we start?" and called `run` in the same turn;
+  - the gate refused, the model told the user it had started anyway, then a 1008 dropped the conversation.
+
+  Fixed since: the question tells the model to end its turn; a premature run returns `[NOT_STARTED] … Do NOT say it has started` (also for `delegate_to_agent`); the SELF-REPAIR panel shows the waiting question with START / ✕, so a click can answer it; the missing-package hint is `python -m pip install -U …` (the model had run `python setup.py` in the wrong project).
 - In `main` before this: coding by voice with Claude Code / Codex delegation and agent-session announcements; compact mode, tray and quick prompt; the HUD redesign; voice barge-in; monitor-under-cursor screenshots; `close_app` by name.
 
 ## Recent decisions
@@ -36,6 +41,6 @@ _Last updated: 2026-10-15_
 - `yt-dlp` is not installed on this machine (found by the first self-check): YouTube on the HUD falls back to the browser until `pip install -U yt-dlp`.
 - Add `health.failed(why)` to the actions' broad `except` blocks so their failures show in tool health.
 - Handle the Live server's GoAway, the remaining 1008 cause: it arrives before the session-duration limit, and today the server closes with "client failed to close the connection after receiving a GoAway signal". Reconnect with the resumption handle when `go_away` arrives.
-- A 1008 "The operation was aborted" came back once on 2026-10-15, right after the second announcement spoken while asleep (each followed by `audio_stream_end`). Watch whether it repeats after consecutive announcements asleep.
+- 1008 "The operation was aborted" is back. On 2026-10-15 there were six in one session, each after an `audio_stream_end` (asleep, after an announcement while asleep, and twice in a row straight after connecting asleep), plus one 1011 keepalive timeout. The Recv error line now prints the seconds since connecting and since the last `audio_stream_end`. Collect those figures before changing the stream-end logic.
 - Muting the mic while awake also stops the stream without `audio_stream_end` — watch for 1008s after answers while muted.
 - Monitor choice for `screen_process` — deferred; the plan is in `progress.md` → Fork backlog.

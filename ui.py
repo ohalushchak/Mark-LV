@@ -2373,9 +2373,11 @@ class RepairPanel(QWidget):
     shown only while something is happening, follows core/self_repair.py:
     the agent working, a change waiting for review, an applied change
     waiting for a restart. The buttons are the human half of the loop —
-    CHECK runs the self-check, REVIEW opens the diff (where APPLY lives),
-    RESTART loads an applied change, STOP cancels a run. The model can do
-    none of APPLY; it has no tool for it."""
+    CHECK runs the self-check, START answers the assistant's "shall I?" (the
+    spoken answer can be lost: seen live, the model asked and then called run
+    in the same breath, and a dropped connection took the conversation with
+    it), REVIEW opens the diff (where APPLY lives), RESTART loads an applied
+    change, STOP cancels a run. The model has no tool for APPLY."""
 
     _changed_sig = pyqtSignal()
     _checked_sig = pyqtSignal()          # a self-check finished (worker thread)
@@ -2411,6 +2413,8 @@ class RepairPanel(QWidget):
         self._btns = {}
         for key, text, tip in (
                 ("check", "CHECK", "Check every tool, the packages, git, disk, key and audio."),
+                ("start", "START", "Yes — let the agent make this change in a separate copy."),
+                ("drop", "✕", "No — drop the change the assistant asked about."),
                 ("review", "REVIEW", "Show the change waiting for review — apply or discard it there."),
                 ("restart", "RESTART", "Restart JARVIS to load the applied change."),
                 ("stop", "STOP", "Stop the self-repair. The running code is not touched.")):
@@ -2429,6 +2433,11 @@ class RepairPanel(QWidget):
         self._checked_sig.connect(lambda: self._btns["check"].setEnabled(True))
         health.on_change(self._changed_sig.emit)
         self_repair.on_change(self._changed_sig.emit)
+        # A question expires after 3 minutes without any event saying so.
+        self._tick_tmr = QTimer(self)
+        self._tick_tmr.setInterval(5000)
+        self._tick_tmr.timeout.connect(self.refresh)
+        self._tick_tmr.start()
         self.restyle()
 
     # ── look ────────────────────────────────────────────────────────────────
@@ -2444,7 +2453,7 @@ class RepairPanel(QWidget):
                 b.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.RED}; "
                                 f"border: 1px solid {C.RED}; border-radius: 3px; }}"
                                 f"QPushButton:hover {{ background: {_mix_hex(C.BG, C.RED, 0.18)}; }}")
-            elif key == "review":
+            elif key in ("review", "start"):
                 b.setStyleSheet(f"QPushButton {{ background: {_mix_hex(C.BG, C.ACC, 0.16)}; "
                                 f"color: {C.ACC}; border: 1px solid {C.ACC}; border-radius: 3px; }}")
             else:
@@ -2479,6 +2488,7 @@ class RepairPanel(QWidget):
         st = self._repair.state()
         phase = st["state"]
         line = {
+            "asked": f"? Waiting for your OK ({st.get('left', 0)} s) — say yes or press START",
             "preparing": f"⟳ Preparing — {st.get('step', '')}",
             "agent": f"⟳ {st.get('step', '')}",
             "testing": f"⟳ {st.get('step', '')}",
@@ -2494,6 +2504,8 @@ class RepairPanel(QWidget):
             self._state_lbl.show()
         else:
             self._state_lbl.hide()
+        self._btns["start"].setVisible(phase == "asked")
+        self._btns["drop"].setVisible(phase == "asked")
         self._btns["review"].setVisible(phase == "review")
         self._btns["restart"].setVisible(phase == "applied")
         self._btns["stop"].setVisible(phase in ("preparing", "agent", "testing"))
@@ -2507,6 +2519,10 @@ class RepairPanel(QWidget):
             self._bg(lambda: self._repair.restart(by_button=True) and "Restarting…")
         elif key == "stop":
             self._bg(self._repair.cancel)
+        elif key == "start":
+            self._bg(lambda: self._repair.run(player=None, by_button=True))
+        elif key == "drop":
+            self._bg(self._repair.drop_pending)
         elif key == "check":
             self._btns["check"].setEnabled(False)
             self._bg(self._check, done=self._checked_sig)

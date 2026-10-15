@@ -101,7 +101,7 @@ def test_run_is_refused_until_the_user_answers(tmp_path, monkeypatch):
     assert "first" in agents.run()                         # nothing asked yet
     out = agents.ask("Fix the bug", tmp_path)
     assert out.startswith("[ASK_USER]") and "Claude Code" in out
-    assert "has not answered" in agents.run()
+    assert agents.run().startswith("[NOT_STARTED]")
     _user_answers()
     assert agents.run().startswith("[AGENT_STARTED]")
 

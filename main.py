@@ -948,6 +948,7 @@ class JarvisLive:
         async def go():
             try:
                 await session.send_realtime_input(audio_stream_end=True)
+                self._stream_end_at = time.monotonic()
                 print(f"[JARVIS] 🔇 Audio stream end sent ({why})")
             except Exception as e:
                 print(f"[JARVIS] ⚠️ Audio stream end failed: {e}")
@@ -2291,7 +2292,13 @@ class JarvisLive:
                         self._tool_responded = True
                         await self._flush_pending_vision()
         except Exception as e:
-            print(f"[JARVIS] ❌ Recv: {e}")
+            # When a session dies, how long after connecting and after the last
+            # audio_stream_end: the 1008s of 2026-10-15 came in runs right after
+            # connecting asleep, and the timing is what tells their causes apart.
+            _now = time.monotonic()
+            _since = lambda t: f"{_now - t:.0f} s" if t else "never"
+            print(f"[JARVIS] ❌ Recv: {e}  (connected {_since(getattr(self, '_connected_at', 0))} "
+                  f"ago, last audio_stream_end {_since(getattr(self, '_stream_end_at', 0))} ago)")
             traceback.print_exc()
             raise
 
@@ -2990,6 +2997,8 @@ class JarvisLive:
                     self._tool_responded       = False
 
                     print("[JARVIS] Connected.")
+                    self._connected_at = time.monotonic()
+                    self._stream_end_at = 0.0
                     if not getattr(self, "_start_marked", False):
                         # Up and talking: the restart watchdog can stop
                         # watching, and anything it rolled back is told.

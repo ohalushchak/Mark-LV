@@ -138,7 +138,8 @@ def test_fix_review_apply_and_undo(repo, monkeypatch):
         "def add(a, b):\n    return a + b\n", encoding="utf-8"))
     out = sr.ask("improve", task="make add() add instead of subtract")
     assert out.startswith("[ASK_USER]")
-    assert "not answered yet" in sr.run()                 # the user has not spoken
+    early = sr.run()                                    # the user has not spoken
+    assert early.startswith("[NOT_STARTED]") and "Do NOT say it has started" in early
     _approve()
     assert sr.run().startswith("[REPAIR_STARTED]")
     r = _wait()
@@ -267,3 +268,20 @@ def test_startup_note_reports_a_rollback(repo):
     (sr.DIR / "rolled_back.json").write_text(json.dumps({"commit": "abcdef123", "exit": 1}))
     assert "rolled back automatically" in sr.startup_note()
     assert sr.startup_note() == ""
+
+
+def test_start_on_the_hud_answers_the_question(repo, monkeypatch):
+    _agent(monkeypatch, lambda wt: (wt / "actions" / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"))
+    sr.ask("improve", task="make add add")
+    st = sr.state()
+    assert st["state"] == "asked" and st["task"] == "make add add" and st["left"] > 170
+    assert sr.run(by_button=True).startswith("[REPAIR_STARTED]")   # no spoken answer needed
+    assert _wait().state == "review"
+
+
+def test_a_question_can_be_dropped(repo):
+    sr.ask("improve", task="make add add")
+    assert sr.drop_pending().startswith("Dropped")
+    assert sr.state()["state"] == "idle"
+    assert "Nothing is waiting" in sr.run(by_button=True)

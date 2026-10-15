@@ -610,8 +610,9 @@ def ask(task: str, cwd: Path, follow_up: bool = False, player=None) -> str:
     return (
         f"[ASK_USER] Nothing has started. Ask the user now, in ONE short sentence in "
         f"their language and your own words, whether to hand this to {how} in the "
-        f"project {Path(cwd).name}. Name the task in a few words.{cont}{warn} Then stop "
-        f"and wait for their answer. If they agree, call delegate_to_agent with "
+        f"project {Path(cwd).name}. Name the task in a few words.{cont}{warn} Then END "
+        f"YOUR TURN — do not call action='run' in this turn; their spoken answer must "
+        f"come first. If they agree, call delegate_to_agent with "
         f"action='run', putting anything they added in 'details'. If they decline, "
         f"drop it."
     )
@@ -627,8 +628,9 @@ def run(details: str = "", player=None, speak=None) -> str:
         return ("Nothing is waiting for the user's approval, so nothing was started. Call "
                 "delegate_to_agent with action='ask' first, then wait for the answer.")
     if not activity.user_answered_since(p["asked_at"]):
-        return ("The user has not answered yet, so nothing was started. Ask them, and use "
-                "action='run' only after they reply.")
+        return ("[NOT_STARTED] Nothing is running: you called run before the user answered "
+                "your question. Do NOT say it has started. End your turn now and wait for "
+                "their reply; if they agree, call delegate_to_agent with action='run' again.")
     engine = p["engine"]
     exe = find_exe(engine)
     if not exe:

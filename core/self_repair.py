@@ -108,6 +108,13 @@ _SYSTEM = (
 
 RUNNING = ("preparing", "agent", "testing")
 
+# Seen live: the model asked "shall we start?" and called run in the same turn,
+# got refused, then told the user it had started. So the refusal says so.
+PREMATURE = (
+    "[NOT_STARTED] Nothing is running: you called run before the user answered your "
+    "question. Do NOT say it has started. End your turn now and wait for their reply; "
+    "if they agree, call {tool} with action='run' again.")
+
 
 class RepairError(Exception):
     pass
@@ -516,18 +523,23 @@ def ask(kind: str, task: str = "", error_id: str = "", player=None) -> str:
         _pending = {"kind": kind, "task": summary, "prompt": prompt, "fingerprint": fp,
                     "error_id": err["id"] if err else "", "asked_at": time.monotonic(),
                     "dirty": dirty}
+    _changed()
     note = (f" Note for the user: they have uncommitted edits ({', '.join(dirty[:4])}); the "
             f"change is made against the last commit.") if dirty else ""
     return (f"[ASK_USER] Nothing has started. Ask the user now, in ONE short sentence in "
             f"their language, whether to let {agents.LABEL[engine]} {'fix' if kind == 'fix' else 'make'}"
             f" this in a separate copy of your code: {summary[:140]}. Mention that nothing "
-            f"changes until they approve the result on screen.{note} Then wait. If they "
-            f"agree, call self_improve with action='run'; if not, drop it.")
+            f"changes until they approve the result on screen.{note} Then END YOUR TURN — "
+            f"do not call action='run' in this turn; the user's spoken answer must come "
+            f"first (they can also press START on the HUD). If they agree, call "
+            f"self_improve with action='run'; if not, drop it.")
 
 
 # ── 2.–5. run ───────────────────────────────────────────────────────────────
 
-def run(details: str = "", player=None) -> str:
+def run(details: str = "", player=None, by_button: bool = False) -> str:
+    """Start the asked repair. From the model only after the user spoke since
+    the question; from the HUD's START button the click is the answer."""
     global _pending, _current
     with _lock:
         p = _pending
@@ -536,8 +548,8 @@ def run(details: str = "", player=None) -> str:
             _pending = None
         return ("Nothing is waiting for the user's approval. Call self_improve with action "
                 "'fix' or 'improve' first, then wait for their answer.")
-    if not activity.user_answered_since(p["asked_at"]):
-        return "The user has not answered yet. Ask them, and use action='run' only after they reply."
+    if not by_button and not activity.user_answered_since(p["asked_at"]):
+        return PREMATURE.format(tool="self_improve")
     busy = _busy()
     if busy:
         return busy
@@ -915,9 +927,30 @@ def describe(r: Repair | None = None) -> str:
     return "\n".join(lines)
 
 
+def pending() -> dict | None:
+    """The repair asked about and not yet started, while it is still valid."""
+    with _lock:
+        p = _pending
+    if p is None or time.monotonic() - p["asked_at"] > ASK_TTL:
+        return None
+    return p
+
+
+def drop_pending() -> str:
+    global _pending
+    with _lock:
+        had, _pending = _pending is not None, None
+    _changed()
+    return "Dropped; nothing was started." if had else "Nothing was waiting."
+
+
 def state() -> dict:
     """A snapshot for the HUD panel."""
     r = current()
+    p = pending()
+    if p is not None and (r is None or r.state not in RUNNING + ("review",)):
+        return {"state": "asked", "task": p["task"],
+                "left": max(0, int(ASK_TTL - (time.monotonic() - p["asked_at"])))}
     if r is None:
         return {"state": "idle"}
     return {"state": r.state, "step": r.step, "task": r.task, "files": len(r.files),

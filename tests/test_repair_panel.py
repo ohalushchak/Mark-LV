@@ -98,3 +98,23 @@ def test_review_overlay_shows_files_tests_and_the_diff():
     assert buttons["LATER"].isDefault()                   # Enter never applies
     buttons["APPLY"].click()
     assert got == ["apply"]
+
+
+def test_a_waiting_question_shows_start(panel, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sr, "run", lambda player=None, by_button=False: calls.append(by_button) or "")
+    with sr._lock:
+        sr._pending = {"task": "add a docstring", "asked_at": __import__("time").monotonic()}
+    panel.refresh()
+    assert not panel._btns["start"].isHidden() and not panel._btns["drop"].isHidden()
+    assert "Waiting for your OK" in panel._state_lbl.text()
+    panel._click("start")
+    for _ in range(50):
+        if calls:
+            break
+        __import__("time").sleep(0.02)
+    assert calls == [True]
+    with sr._lock:
+        sr._pending = None
+    panel.refresh()
+    assert panel._btns["start"].isHidden()

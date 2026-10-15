@@ -102,3 +102,11 @@ def test_the_real_tools_declare_working_probes():
     for mod in (git_project, project_workspace, run_command):
         ok, detail = mod.TOOL["probe"]()
         assert isinstance(ok, bool) and detail
+
+
+def test_missing_packages_come_with_a_command_that_works_anywhere(monkeypatch, tmp_path):
+    (tmp_path / "requirements.txt").write_text("surely-not-installed-pkg>=1\n", encoding="utf-8")
+    monkeypatch.setattr(capabilities, "REPO", tmp_path)
+    ok, detail = capabilities._check_requirements()
+    assert not ok and "python -m pip install -U surely-not-installed-pkg" in detail
+    assert "setup.py" not in detail
