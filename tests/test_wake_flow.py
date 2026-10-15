@@ -225,3 +225,29 @@ def test_sleep_tool_without_wake_word_explains_instead():
 def test_sleep_tool_is_declared_once():
     names = [t["name"] for t in main.TOOL_DECLARATIONS]
     assert names.count("sleep_assistant") == 1
+
+
+def test_a_typed_command_wakes_the_assistant_and_is_sent():
+    """It used to be refused while asleep, with the note in a log the compact
+    card hides — so the F9 quick prompt looked like it did nothing."""
+    j = _jarvis()
+    order = []
+
+    class _Session:
+        async def send_client_content(self, turns, turn_complete):
+            order.append(("sent", j._awake, turns["parts"][0]["text"]))
+
+    async def run():
+        j._loop = asyncio.get_running_loop()
+        j.session = _Session()
+        orig = j.wake
+        j.wake = lambda reason="": (order.append(("wake", reason)), orig(reason))
+        await asyncio.to_thread(j._on_text_command, "what time is it")
+        for _ in range(20):
+            if any(o[0] == "sent" for o in order):
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    assert order == [("wake", "typed command"), ("sent", True, "what time is it")]
+    assert "SYS: Awake — typed command." in j.ui.log

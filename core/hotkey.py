@@ -171,3 +171,110 @@ class PushToTalk:
 
         self._set_held(False)
         self._scope = "window"
+
+
+# ── A press-only global hotkey (the quick prompt) ───────────────────────────
+#
+# Push-to-talk polls key state because it needs the release. A hotkey that
+# only has to notice a press is what `RegisterHotKey` is for, and it does two
+# things polling cannot: Windows swallows the key, so the app in front does
+# not also act on it, and the press counts as input to this process, which is
+# what lets the popup it opens take the keyboard focus (a background process
+# that merely calls SetForegroundWindow gets a flashing taskbar button
+# instead). The registration fails when another program already owns the key;
+# `scope` then says "window" and the caller binds an application shortcut.
+
+_HOTKEY_MODS = {"alt": 0x0001, "ctrl": 0x0002, "shift": 0x0004, "win": 0x0008}
+_MOD_NOREPEAT = 0x4000
+_WM_HOTKEY = 0x0312
+_WM_QUIT = 0x0012
+
+_VK.update({"j": 0x4A, "k": 0x4B, "q": 0x51, "f7": 0x76, "f11": 0x7A, "f12": 0x7B})
+_QT_NAME.update({"j": "J", "k": "K", "q": "Q", "f7": "F7", "f11": "F11",
+                 "f12": "F12", "win": "Meta"})
+
+
+def parse_chord(text: str) -> tuple[str, ...]:
+    """"Ctrl+Alt+J" → ("ctrl", "alt", "j"); unknown keys give ()."""
+    keys = tuple(k.strip().lower() for k in str(text or "").split("+") if k.strip())
+    if not keys or keys[-1] not in _VK or any(k not in _HOTKEY_MODS for k in keys[:-1]):
+        return ()
+    return keys
+
+
+class GlobalHotkey:
+    """Calls `on_press()` (on its own thread) each time the chord is pressed.
+
+    `start()` returns "global" when Windows granted the hotkey, else "window".
+    Safe to stop when never started, and to start again with another chord.
+    """
+
+    def __init__(self, on_press: Callable[[], None], chord=("f9",)):
+        self._on_press = on_press
+        self._chord = tuple(chord)
+        self._thread: threading.Thread | None = None
+        self._tid = 0
+        self._scope = "window"
+        self._ready = threading.Event()
+
+    @property
+    def scope(self) -> str:
+        return self._scope
+
+    @property
+    def label(self) -> str:
+        return chord_label(self._chord)
+
+    def start(self) -> str:
+        self.stop()
+        self._scope = "window"
+        if _OS != "Windows" or not self._chord or self._chord[-1] not in _VK:
+            return self._scope
+        self._ready.clear()
+        self._thread = threading.Thread(target=self._loop, name="quick-prompt-hotkey",
+                                        daemon=True)
+        self._thread.start()
+        # The registration result is known within a few milliseconds.
+        self._ready.wait(timeout=1.0)
+        return self._scope
+
+    def stop(self) -> None:
+        t, self._thread = self._thread, None
+        if t is not None and t.is_alive() and self._tid:
+            try:
+                import ctypes
+                ctypes.windll.user32.PostThreadMessageW(self._tid, _WM_QUIT, 0, 0)
+            except Exception:
+                pass
+            t.join(timeout=1.0)
+        self._tid = 0
+        self._scope = "window"
+
+    def _loop(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        self._tid = kernel32.GetCurrentThreadId()
+        mods = _MOD_NOREPEAT
+        for k in self._chord[:-1]:
+            mods |= _HOTKEY_MODS.get(k, 0)
+        # The hotkey belongs to this thread (hwnd NULL), so this thread's own
+        # message loop below is where WM_HOTKEY arrives, and where it must be
+        # unregistered.
+        ok = bool(user32.RegisterHotKey(None, 1, mods, _VK[self._chord[-1]]))
+        self._scope = "global" if ok else "window"
+        self._ready.set()
+        if not ok:
+            return
+        try:
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == _WM_HOTKEY:
+                    try:
+                        self._on_press()
+                    except Exception:
+                        pass     # a listener fault must never kill the loop
+        finally:
+            user32.UnregisterHotKey(None, 1)
+            self._scope = "window"
