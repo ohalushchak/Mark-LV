@@ -1,4 +1,11 @@
-#desktop.py
+"""Desktop skill: the `desktop_control` tool.
+
+Changes the wallpaper (from a file or a URL), reports the current one, lists,
+organizes (by type or by date), cleans and summarizes the Desktop folder, and
+handles free-form desktop requests by asking Gemini for a short script that
+runs in a restricted sandbox (`_build_sandbox`). Each OS has its own path
+(Windows / macOS / Linux) inside the helpers.
+"""
 import os
 import sys
 import json
