@@ -524,6 +524,11 @@ class Job:
     denied: int = 0
     files: set = field(default_factory=set)
     ended: float = 0.0
+    # Set for a job another module owns (core/self_repair.py): its own rules
+    # instead of _SYSTEM, and its own handling of the outcome instead of the
+    # announcement below — that module announces once it has checked the work.
+    system: str = ""
+    on_done: Callable[["Job"], None] | None = None
 
     @property
     def minutes(self) -> float:
@@ -605,8 +610,9 @@ def ask(task: str, cwd: Path, follow_up: bool = False, player=None) -> str:
     return (
         f"[ASK_USER] Nothing has started. Ask the user now, in ONE short sentence in "
         f"their language and your own words, whether to hand this to {how} in the "
-        f"project {Path(cwd).name}. Name the task in a few words.{cont}{warn} Then stop "
-        f"and wait for their answer. If they agree, call delegate_to_agent with "
+        f"project {Path(cwd).name}. Name the task in a few words.{cont}{warn} Then END "
+        f"YOUR TURN — do not call action='run' in this turn; their spoken answer must "
+        f"come first. If they agree, call delegate_to_agent with "
         f"action='run', putting anything they added in 'details'. If they decline, "
         f"drop it."
     )
@@ -622,8 +628,9 @@ def run(details: str = "", player=None, speak=None) -> str:
         return ("Nothing is waiting for the user's approval, so nothing was started. Call "
                 "delegate_to_agent with action='ask' first, then wait for the answer.")
     if not activity.user_answered_since(p["asked_at"]):
-        return ("The user has not answered yet, so nothing was started. Ask them, and use "
-                "action='run' only after they reply.")
+        return ("[NOT_STARTED] Nothing is running: you called run before the user answered "
+                "your question. Do NOT say it has started. End your turn now and wait for "
+                "their reply; if they agree, call delegate_to_agent with action='run' again.")
     engine = p["engine"]
     exe = find_exe(engine)
     if not exe:
@@ -656,12 +663,48 @@ def status() -> str:
     j = job()
     if j is None:
         return "No agent has been given a task this session."
+    if j.on_done is not None:
+        # Seen live: the model asked delegate_to_agent about a self-repair run,
+        # read it as a job in the current project and named the wrong project.
+        return (f"The agent's last job was a self-repair of JARVIS's own code ({j.task[:120]}), "
+                f"not a task in the user's project. Use self_improve with action='status' "
+                f"or 'review' for it.")
     if not j.done:
         latest = f" Latest step: {j.last_step}." if j.last_step else ""
         return (f"{LABEL[j.engine]} is still working on: {j.task[:120]}. "
                 f"{j.elapsed} in, {j.steps} step(s) so far.{latest}")
     state_ = "finished" if j.ok else "did not finish"
     return f"{LABEL[j.engine]}'s last task ({j.task[:120]}) {state_}. Its report: {j.report[:700]}"
+
+
+def start_owned(task: str, cwd: Path, system: str, on_done: Callable[[Job], None],
+                player=None) -> str:
+    """Start a job for another module, which has already asked the user.
+    Returns '' when started, else a sentence saying why not. The selected
+    engine, model and effort apply, as for any job."""
+    global _job
+    cur = current()
+    engine = cur["engine"]
+    exe = find_exe(engine)
+    if not exe:
+        return f"{LABEL[engine]} is not installed on this computer."
+    level, sentence = _limit_problem(engine)
+    if level == "blocked":
+        return sentence
+    model = cur["model"]
+    if engine == "codex" and not model:
+        model = next((m.id for m in models("codex") if m.is_default), "")
+    with _lock:
+        if _job and not _job.done:
+            return _busy() or "An agent is busy."
+        j = Job(engine=engine, task=task, cwd=str(cwd), model=model, effort=cur["effort"],
+                system=system, on_done=on_done)
+        _job = j
+    _log(player, f"SYS: {LABEL[engine]} started: {task[:90]}")
+    threading.Thread(target=_work, args=(j, exe, player), name="coding-agent",
+                     daemon=True).start()
+    _changed()
+    return ""
 
 
 def cancel() -> str:
@@ -684,7 +727,7 @@ def build_argv(j: Job, exe: str) -> list[str]:
     if j.engine == "claude":
         argv = [exe, "-p", "--output-format", "stream-json", "--verbose",
                 "--permission-mode", "auto", "--permission-prompts", "none",
-                "--append-system-prompt", _SYSTEM]
+                "--append-system-prompt", j.system or _SYSTEM]
         if j.model:
             argv += ["--model", j.model]
         if j.effort:
@@ -712,7 +755,7 @@ def _prompt(j: Job) -> str:
     if j.details:
         text += f"\n\nWhen approving, the user added: {j.details}"
     if j.engine == "codex":
-        text = f"{_SYSTEM}\n\nTask:\n{text}"        # codex exec has no system-prompt flag
+        text = f"{j.system or _SYSTEM}\n\nTask:\n{text}"   # codex exec has no system-prompt flag
     return text
 
 
@@ -725,6 +768,15 @@ def _work(j: Job, exe: str, player) -> None:
     j.ok, j.report, j.done = ok, report, True
     if j.session_id:
         _sessions[(j.engine, j.cwd)] = j.session_id
+    if j.on_done is not None:
+        _log(player, f"SYS: {LABEL[j.engine]} {'finished' if ok else 'did not finish'} "
+                     f"after {j.elapsed}.")
+        try:
+            j.on_done(j)
+        except Exception as e:
+            _log(player, f"ERR: handling {LABEL[j.engine]}'s result failed — {e}")
+        _changed()
+        return
     _log(player, f"SYS: {LABEL[j.engine]} {'finished' if ok else 'did not finish'} "
                  f"after {j.elapsed} — report on screen.")
     if player is not None:
@@ -814,6 +866,9 @@ def _run(j: Job, exe: str, player) -> tuple[bool, str]:
                        f"by Claude Code's safety check.)")
         ok = not res.get("is_error") and res.get("subtype", "success") == "success"
         return ok, report
+    if st.get("sandbox_down") and not j.files:
+        return False, SANDBOX_HINT + (f"\n\nCodex's own words: {st['last_text'][:400]}"
+                                      if st["last_text"] else "")
     if st["error"]:
         return False, f"Codex stopped with an error: {st['error'][:600]}"
     if st["result"] is None:
@@ -891,6 +946,10 @@ def _parse_codex(j: Job, ev: dict, st: dict) -> str:
             j.files.update(paths)
             if paths:
                 return f"Edit: {Path(paths[0]).name}" + (f" (+{len(paths) - 1})" if len(paths) > 1 else "")
+        elif t == "command_execution":
+            out = str(item.get("aggregated_output") or "")
+            if any(s in out for s in _SANDBOX_DOWN):
+                st["sandbox_down"] = True
         elif t == "error" and st.get("turn"):
             # Errors before the turn are config warnings (malformed agent
             # roles, plugin hooks); only ones during the work matter.
@@ -901,6 +960,19 @@ def _parse_codex(j: Job, ev: dict, st: dict) -> str:
         err = ev.get("error") if isinstance(ev.get("error"), dict) else {}
         st["error"] = str(err.get("message") or ev.get("message") or "unknown error")
     return ""
+
+
+# Codex's Windows sandbox refreshes its ACL setup before each command. Seen on
+# 2026-10-15: while Codex's computer-use runtime (node_repl.exe) was running,
+# that refresh failed with "setup refresh had errors" in every folder, so no
+# command could start — and Codex still ended its turn "successfully" with a
+# report saying it could not do the job.
+_SANDBOX_DOWN = ("helper_unknown_error", "setup refresh had errors")
+SANDBOX_HINT = (
+    "Codex's Windows sandbox could not start any command on this computer (its setup "
+    "refresh failed — usually while the Codex app's computer-use runtime is running). "
+    "Nothing was done. The user can switch to Claude Code in the AGENT panel, or close "
+    "the Codex app and try again.")
 
 
 def _kill(j: Job, why: str) -> None:

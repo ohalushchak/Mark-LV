@@ -1,3 +1,16 @@
+"""Weather report skill: the `weather_report` tool.
+
+Opens a Google weather search for the requested city (and optional day) in the
+user's default browser, so the answer is the live weather card rather than
+text scraped or guessed by the model. The handler returns a short spoken
+sentence, logs it to the HUD, and records the search in session memory when
+that is available.
+
+A missing city or a browser that cannot be opened is returned as a spoken
+message instead of raising. Discovered automatically through the module-level
+`TOOL` dict (see core/action_loader.py).
+"""
+
 import webbrowser
 from urllib.parse import quote_plus
 

@@ -55,7 +55,9 @@ It's not just an assistant — it's an extension of your digital life.
 | 🛎️ Tray Icon | A notification-area icon coloured by state, with the latest reply in its tooltip and Open HUD, compact mode, quick prompt, mute, desktop orb and Quit in its menu |
 | ⌨️ Quick Prompt | Press F9 (or Ctrl+Alt+J) in any app: a one-line box opens mid-screen, Enter sends it to JARVIS, waking it if it was asleep |
 | 💻 Coding by Voice | Open a project by name ("open project Mark LIV"), search and read its files, make exact edits you can undo, run commands and tests, and use git — status, diffs, commits and branches you can undo, push and draft pull requests behind CONFIRM. Commands that only read run at once, ones that change things wait for CONFIRM, destructive ones are refused; a long build keeps running and is announced when it ends |
-| 🤖 Coding Agents | Hand a large job to **Claude Code** or **Codex**: JARVIS asks first, the agent works in the background on your own plan, and the outcome is spoken when it is done. The AGENT panel switches the agent, its model and effort, and shows the 5-hour and weekly usage limits |
+| 🤖 Coding Agents | Hand a large job to **Claude Code** or **Codex**: JARVIS asks first, the agent works in the background on your own plan, and the outcome is spoken when it is done. While it works, a ring in the agent's colour (coral for Claude Code, violet for Codex) turns around the hologram with what it is doing and for how long, and flashes green or red when it ends. The AGENT panel switches the agent, its model and effort, and shows the 5-hour and weekly usage limits |
+| 🩺 Self-Check | "What's broken?" — every tool failure is written to an error journal (keys and your paths hidden) and each tool shows green, yellow or red in the SELF-REPAIR panel. "Check yourself" probes every tool, the packages, git, disk, key and audio devices, and can run the test suite. A malformed tool call is refused with what to correct instead of half-running, and a tool that returns nothing is no longer reported as "Done." |
+| 🛠️ Self-Repair | "Fix that error" or "improve yourself so that…": after you agree, Claude Code or Codex changes JARVIS's own code in a separate copy, the tests run before and after, and the change is refused if it touches a protected file (the safety gates, the tests, config) or breaks a test. You see the diff on the HUD and press APPLY or DISCARD — the assistant cannot apply it. An applied change is one commit you can undo; JARVIS restarts to load it and rolls it back by itself if it then fails to start |
 | 🔔 Agent Sessions | Optional: your own Claude Code and Codex sessions are announced when a long turn ends or when they are waiting for your permission (a hook, switched on in CONTROLS) |
 | 💬 Ask ChatGPT / Claude | "Ask ChatGPT …" copies the question and opens the app for you to send — it says plainly that it cannot read the answer back |
 | 🔵 Desktop Orb | With the JARVIS window minimised or behind another app, a small orb at the top of your screen shows it talking — only while it speaks, or all the time (listening, thinking, muted) |
@@ -346,6 +348,8 @@ Mark LV/
 │   ├── git_project.py        # Status, diff, log, branches, commits (undoable), push and draft PRs behind CONFIRM
 │   ├── delegate_to_agent.py  # Large coding jobs to Claude Code or Codex; agent, model, effort, usage limits
 │   ├── ask_chat_app.py       # Hands a question to the ChatGPT or Claude app via the clipboard
+│   ├── self_check.py         # "What's broken?" — error journal, tool health, probes, test run (read-only)
+│   ├── self_improve.py       # Fix or improve JARVIS's own code through the agent — ask, run, review, restart
 │   └── desktop.py            # Desktop and taskbar control
 ├── memory/
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
@@ -372,6 +376,12 @@ Mark LV/
 │   ├── agents.py             # Claude Code / Codex runs, models and efforts, usage limits
 │   ├── agent_relay.py        # Announces your own agent sessions; installs the hook into both CLIs
 │   ├── agent_hook.py         # The hook Claude Code and Codex run — drops events into ~/.jarvis/agent_queue
+│   ├── tool_args.py          # Checks each tool call against its schema before it runs
+│   ├── health.py             # Error journal (redacted) and per-tool green / yellow / red
+│   ├── capabilities.py       # Probes of tools, packages and devices; the test-suite runner
+│   ├── self_repair.py        # Self-repair loop — worktree, tests before/after, change check, review, apply
+│   ├── restart_helper.py     # Restarts JARVIS and rolls back a self-repair that stops it starting
+│   ├── console_log.py        # Copies the console to ~/.jarvis/logs/console.log
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
@@ -405,7 +415,7 @@ Everything stays on your machine. There is no MARK server, no telemetry and no a
 
 All three are listed in `.gitignore`, so a fork or a pull request cannot leak them by accident. **If you have already committed `config/api_keys.json` anywhere public, revoke that key** at [aistudio.google.com](https://aistudio.google.com/app/apikey) and generate a new one — removing the file in a later commit does not remove it from the history.
 
-Your voice is streamed to Google's Gemini Live API while a session is open, and it stops when you mute or close the app. The coding tools add two more: file contents and command output they read go to Gemini as tool results (files with keys — `api_keys.json`, `.env`, private keys — are never read), and a job you hand to Claude Code or Codex is sent by that CLI to Anthropic or OpenAI under your own account. The agent-session hook writes its events to `~/.jarvis/agent_queue` on your machine only.
+Your voice is streamed to Google's Gemini Live API while a session is open, and it stops when you mute or close the app. The coding tools add two more: file contents and command output they read go to Gemini as tool results (files with keys — `api_keys.json`, `.env`, private keys — are never read), and a job you hand to Claude Code or Codex is sent by that CLI to Anthropic or OpenAI under your own account. The agent-session hook writes its events to `~/.jarvis/agent_queue` on your machine only. A copy of the console log (`~/.jarvis/logs/`), the error journal (`~/.jarvis/health/`) and self-repair's working copies and history (`~/.jarvis/self_repair/`) stay on your machine too; the journal hides keys, tokens, e-mail addresses and your home folder, and an error is sent to Claude Code or Codex only when you agree to a fix.
 
 ---
 

@@ -46,6 +46,7 @@ class PluginRecord:
     settings: Optional[dict] = None   # optional PLUGIN_SETTINGS schema (config fields)
     behavior: Optional[str] = None    # None = the API's default (blocking)
     scheduling: Optional[str] = None  # None = the API's default (WHEN_IDLE)
+    probe: Optional[Callable] = None  # () -> (ok, detail), as in core/action_loader.py
 
 
 class PluginRegistry:
@@ -78,6 +79,10 @@ class PluginRegistry:
     def has(self, name: str) -> bool:
         return name in self._plugins
 
+    def records(self) -> list[PluginRecord]:
+        """Valid and rejected plugins — for self_check."""
+        return list(self._all_records)
+
     def scheduling(self, name: str) -> Optional[str]:
         """How this plugin's result should re-enter the conversation, if it said."""
         rec = self._plugins.get(name)
@@ -90,9 +95,17 @@ class PluginRegistry:
             return f"Plugin '{name}' is not available."
         if not get_plugin_enabled(name):
             return f"The '{name}' plugin is currently disabled."
+        from core import health
+        from core.action_loader import NO_RESULT
+        health.begin_call()
         try:
-            return _call_run(rec.run, parameters, player, session_memory) or "Done."
+            result = _call_run(rec.run, parameters, player, session_memory)
+            health.record_result(name, result, args=parameters)
+            return result or NO_RESULT
         except Exception as e:
+            health.end_call()
+            health.record(name, False, "crash", f"{type(e).__name__}: {e}", exc=e,
+                          args=parameters)
             self._logger(f"Plugin '{name}' crashed during run(): {e}")
             self._notify(f"Plugin '{name}' failed — see the console for details.")
             traceback.print_exc()
@@ -189,7 +202,8 @@ def _validate(module, filename: str) -> PluginRecord:
     return PluginRecord(name=name, description=description.strip(), parameters=parameters,
                          run=run_fn, file=filename, valid=True, error="", settings=settings,
                          behavior=_opt_upper(plugin_meta.get("behavior"), _BEHAVIORS),
-                         scheduling=_opt_upper(plugin_meta.get("scheduling"), _SCHEDULING))
+                         scheduling=_opt_upper(plugin_meta.get("scheduling"), _SCHEDULING),
+                         probe=plugin_meta.get("probe") if callable(plugin_meta.get("probe")) else None)
 
 
 def _load_error(path: Path, plugins_dir: Path, exc: Exception) -> str:
