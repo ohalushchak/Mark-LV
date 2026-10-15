@@ -6,7 +6,7 @@ _Last updated: 2026-10-15_
 
 ## Done in this fork
 
-- Self-check and self-repair, mixed from forks (tests in `tests/test_tool_health.py`, `test_self_check.py`, `test_self_repair.py`, `test_repair_panel.py`). Not yet tried live.
+- Self-check and self-repair, mixed from forks (tests in `tests/test_tool_health.py`, `test_self_check.py`, `test_self_repair.py`, `test_repair_panel.py`). Tried live on Windows with Claude Code up to APPLY and the restart; the agent ring, undo after restart and the watchdog rollback are not yet seen live.
   - **Honest results:** tool arguments checked against the schema before anything runs, with a "nothing ran, correct X" refusal (BlackStarG5); no result is reported as unverified instead of "Done.".
   - **Health:** a redacted error journal and per-tool green / yellow / red (klcenka9's thresholds, syamsulmuiin's redaction); uncaught thread and asyncio errors journaled.
   - **Self-check:** `self_check` — status, the journal, one error in detail, probes of tools, packages, git, disk, key and audio, and an optional test run (TeddyDARKVADOR's probes; `TOOL["probe"]` on run_command, git_project, delegate_to_agent, project_workspace).
