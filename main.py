@@ -1098,12 +1098,14 @@ class JarvisLive:
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
-        # Respect wake-word sleep: a typed command must not be answered while
-        # asleep either (the sleep gate is not just for the mic). Wake first with
-        # the wake phrase or the WAKE NOW button.
+        # Typing is as deliberate as the WAKE NOW button, so a typed command
+        # wakes the assistant instead of being refused. The sleep gate is there
+        # so the room cannot talk to the model, and typed text is never the
+        # room. Refusing it used to make the F9 quick prompt look dead: the
+        # "I'm asleep" note went to a log that compact mode keeps hidden.
+        # wake() is queued first, so it runs on the loop before the send.
         if self._wake_enabled and not self._awake:
-            self.ui.write_log(f"SYS: I'm asleep — say '{self._wake_label}' or tap WAKE NOW first.")
-            return
+            self._loop.call_soon_threadsafe(self.wake, "typed command")
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -1739,6 +1741,7 @@ class JarvisLive:
                         except Exception:
                             pass
                     await asyncio.sleep(1.5)
+                    print("[UI] Quitting — shutdown_jarvis tool", flush=True)
                     import os as _os
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())

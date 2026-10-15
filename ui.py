@@ -1103,6 +1103,7 @@ class ReplyCaption(QTextEdit):
     """
 
     _LINES = 3
+    _FONT_PT = 11
     _STEP_MS = 18
     # Long answers finish typing within this many steps (≈2.7 s) instead of
     # crawling for half a minute behind the voice.
@@ -1115,7 +1116,7 @@ class ReplyCaption(QTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setFont(_font(11))
+        self.setFont(_font(self._FONT_PT))
         self.setFixedHeight(int(QFontMetrics(self.font()).lineSpacing() * self._LINES + 14))
         self._ai_lc = (assistant_name or "jarvis").lower()
         self._text = ""
@@ -1218,6 +1219,9 @@ class DesktopOrb(QWidget):
             hud = self._owner.hud
             if self._orb is None or self.mode == "off":
                 return False
+            card = getattr(self._owner, "_compact", None)
+            if card is not None and card.isVisible():
+                return False
             if self.mode == "speaking" and not (hud.speaking and not hud.muted):
                 return False
             o = self._owner
@@ -1284,6 +1288,576 @@ class DesktopOrb(QWidget):
         # Rings reach ~1.37 r at full voice; keep them inside the badge.
         self._orb.paint(p, c, c, (c - 3.0) / 1.4, main, acc, bg)
         p.end()
+
+
+class _CardCaption(ReplyCaption):
+    """The card's copy of the captions: smaller type, its own background, and
+    transparent to the mouse so the card can be dragged by its text."""
+
+    _FONT_PT = 8.5
+
+    def __init__(self, assistant_name: str, parent=None):
+        super().__init__(assistant_name, parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setPlaceholderText("Your last exchange with JARVIS shows here.")
+        self.show()
+
+    def _restyle(self, color: str) -> None:
+        self.setStyleSheet(f"""
+            QTextEdit {{ background: transparent; color: {color};
+                border: none; padding: 0px 2px; }}""")
+
+
+class _CardOrb(QWidget):
+    """The orb in the card's corner — `OrbHud`, stepped by the card."""
+
+    def __init__(self, size: int, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.orb = None
+        if OrbHud is not None:
+            try:
+                self.orb = OrbHud()
+            except Exception:
+                self.orb = None
+        self.colours = (qcol(C.PRI), qcol(C.PRI_DIM))
+
+    def paintEvent(self, _):
+        if self.orb is None:
+            return
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = self.width() / 2.0
+        # Rings reach ~1.37 r at full voice; keep them inside the widget.
+        self.orb.paint(p, c, c, (c - 2.0) / 1.4, *self.colours, qcol(C.BG))
+        p.end()
+
+
+class CompactCard(QWidget):
+    """Compact mode: a small card on top of other windows instead of the HUD.
+
+    Mixed from three forks. omygod9138/Mark-L gave the pattern — a card with an
+    orb, the state and the last reply, dragged anywhere and remembered, double
+    click for the full HUD. maltahhan10-a11y/Mark-LII gave the handling — a
+    hover strip of actions, a right-click menu, a drag that only starts after a
+    few pixels so a click stays a click, and a position kept on screen. An
+    action that needs CONFIRM brings the HUD back rather than putting the gate
+    here: it is rare, and the HUD's banner is the one place it is answered.
+
+    It draws nothing of its own: the orb is `OrbHud`, the text is the captions'
+    logic, the actions call the main window's own handlers. Unlike omygod's card
+    it stays on top (theirs sat under every other window), and unlike both forks
+    it steps its animation only while it is visible.
+    """
+
+    _W = 300
+    _ORB = 64
+    _DRAG_PX = 4
+
+    def __init__(self, owner):
+        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                 | Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(None, flags)
+        self._owner = owner
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setFixedWidth(int(self._W * (1.0 + (_UI_SCALE - 1.0) * 0.5)))
+        self._press = None          # (global pos, window pos) at mouse down
+        self._dragging = False
+        self._step_t = time.time()
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+
+        top = QHBoxLayout(); top.setSpacing(10)
+        self._orb = _CardOrb(self._ORB)
+        top.addWidget(self._orb)
+        col = QVBoxLayout(); col.setSpacing(2)
+        self._name = QLabel(owner._assistant_name.upper())
+        self._name.setFont(_font(11, QFont.Weight.Bold))
+        col.addWidget(self._name)
+        self._state = QLabel("● LISTENING")
+        self._state.setFont(_font(8.5, QFont.Weight.Bold))
+        col.addWidget(self._state)
+        col.addStretch()
+        top.addLayout(col, stretch=1)
+        lay.addLayout(top)
+
+        self.caption = _CardCaption(owner._assistant_name)
+        lay.addWidget(self.caption)
+
+        # Hover strip. Its row keeps its height when the buttons hide, so the
+        # card does not jump under the mouse.
+        self._strip = QWidget()
+        self._strip.setFixedHeight(26)
+        sl = QHBoxLayout(self._strip)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(6)
+        self._hud_btn = QPushButton("⤢  HUD")
+        self._mic_btn = QPushButton("🎙  MIC")
+        self._stop_btn = QPushButton("✋  STOP")
+        for b, tip in ((self._hud_btn, "Back to the full HUD (or double-click the card)."),
+                       (self._mic_btn, "Mute or unmute the microphone."),
+                       (self._stop_btn, "Interrupt what JARVIS is saying.")):
+            b.setFixedHeight(24)
+            b.setFont(_font(7.5, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(tip)
+            b.hide()
+            sl.addWidget(b)
+        self._hud_btn.clicked.connect(owner.exit_compact)
+        self._mic_btn.clicked.connect(owner._toggle_mute)
+        self._stop_btn.clicked.connect(owner._do_interrupt)
+        lay.addWidget(self._strip)
+
+        sc = QShortcut(QKeySequence("F10"), self)
+        sc.activated.connect(owner.exit_compact)
+
+        self._tmr = QTimer(self)
+        self._tmr.setInterval(33)
+        self._tmr.timeout.connect(self._tick)
+        self.restyle()
+        self.hide()
+
+    # ── look ────────────────────────────────────────────────────────────────
+
+    def restyle(self) -> None:
+        """Rebuild the colours — on creation and after a theme switch."""
+        self._name.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self.caption._restyle(C.TEXT)
+        btn = f"""
+            QPushButton {{ background: {_mix_hex(C.BG, C.PRI, 0.06)}; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px; }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}"""
+        for b in (self._hud_btn, self._mic_btn, self._stop_btn):
+            b.setStyleSheet(btn)
+        self.refresh_state()
+        self.update()
+
+    def set_name(self, name: str) -> None:
+        self._name.setText((name or "JARVIS").upper())
+        self.caption.set_assistant_name(name)
+
+    def refresh_state(self) -> None:
+        hud = self._owner.hud
+        if hud.muted:
+            txt, col = "⊘  MUTED", C.MUTED_C
+        elif hud.speaking:
+            txt, col = "●  SPEAKING", C.ACC
+        elif hud.state in ("THINKING", "PROCESSING"):
+            txt, col = f"◈  {hud.state}", C.ACC2
+        elif hud.state == "LISTENING":
+            txt, col = "●  LISTENING", C.GREEN
+        else:
+            txt, col = f"○  {hud.state}", C.PRI_DIM
+        self._state.setText(txt)
+        self._state.setStyleSheet(f"color: {col}; background: transparent;")
+        self._mic_btn.setText("🎙  UNMUTE" if hud.muted else "🎙  MUTE")
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(qcol(C.BORDER_B), 1.2))
+        p.setBrush(QBrush(qcol(C.BG, 242)))
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0), 10, 10)
+        p.end()
+
+    # ── showing ─────────────────────────────────────────────────────────────
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._step_t = time.time()
+        self.refresh_state()
+        self._tmr.start()
+
+    def hideEvent(self, e):
+        self._tmr.stop()
+        super().hideEvent(e)
+
+    def place(self) -> None:
+        """Where it was left, kept on the screen it was left on — or the top
+        right of the screen under the mouse when that screen is gone."""
+        self.adjustSize()
+        pos = None
+        try:
+            from memory.config_manager import get_compact_pos
+            pos = get_compact_pos()
+        except Exception:
+            pass
+        screen = None
+        if pos is not None:
+            screen = QGuiApplication.screenAt(QPoint(pos[0] + 20, pos[1] + 20))
+        if screen is None:
+            screen = (QGuiApplication.screenAt(QCursor.pos())
+                      or QGuiApplication.primaryScreen())
+            if screen is None:
+                return
+            a = screen.availableGeometry()
+            pos = (a.right() - self.width() - 24, a.top() + 24)
+        self.move(*self._clamp(pos[0], pos[1], screen))
+
+    def _clamp(self, x: int, y: int, screen=None) -> tuple[int, int]:
+        """Keep the whole card on one screen: the one its centre is over."""
+        if screen is None:
+            screen = (QGuiApplication.screenAt(QPoint(x + self.width() // 2,
+                                                      y + self.height() // 2))
+                      or self.screen() or QGuiApplication.primaryScreen())
+        if screen is None:
+            return x, y
+        a = screen.availableGeometry()
+        x = max(a.left(), min(x, a.right() - self.width() + 1))
+        y = max(a.top(), min(y, a.bottom() - self.height() + 1))
+        return x, y
+
+    # ── animation ───────────────────────────────────────────────────────────
+
+    def _tick(self) -> None:
+        now = time.time()
+        dt, self._step_t = now - self._step_t, now
+        hud = self._owner.hud
+        orb = self._orb.orb
+        if orb is None:
+            return
+        orb.step(dt, hud._amp_disp, speaking=hud.speaking,
+                 muted=hud.muted, state=hud.state)
+        self._orb.colours = hud._core_colours()
+        busy = (hud.speaking or hud._amp_disp > 0.02
+                or hud.state in ("THINKING", "PROCESSING"))
+        self._tmr.setInterval(33 if busy else 50)
+        self._orb.update()
+
+    # ── mouse ───────────────────────────────────────────────────────────────
+
+    def enterEvent(self, e):
+        for b in (self._hud_btn, self._mic_btn, self._stop_btn):
+            b.show()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        for b in (self._hud_btn, self._mic_btn, self._stop_btn):
+            b.hide()
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._press = (e.globalPosition().toPoint(), self.pos())
+            self._dragging = False
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._press is None:
+            return
+        start, origin = self._press
+        delta = e.globalPosition().toPoint() - start
+        if not self._dragging and delta.manhattanLength() < self._DRAG_PX:
+            return
+        self._dragging = True
+        self.move(origin + delta)
+
+    def mouseReleaseEvent(self, e):
+        if self._press is not None and self._dragging:
+            x, y = self._clamp(self.x(), self.y())
+            self.move(x, y)
+            try:
+                from memory.config_manager import save_compact_pos
+                save_compact_pos(x, y)
+            except Exception:
+                pass
+        self._press = None
+        self._dragging = False
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._owner.exit_compact()
+
+    def contextMenuEvent(self, e):
+        from PyQt6.QtWidgets import QMenu
+        m = QMenu(self)
+        m.setStyleSheet(f"""
+            QMenu {{ background: {C.PANEL}; color: {C.TEXT};
+                border: 1px solid {C.BORDER_B}; }}
+            QMenu::item:selected {{ background: {C.PRI_GHO}; color: {C.PRI}; }}""")
+        hud = self._owner.hud
+        m.addAction("⤢  Open HUD", self._owner.exit_compact)
+        m.addAction("🎙  Unmute microphone" if hud.muted else "🎙  Mute microphone",
+                    self._owner._toggle_mute)
+        m.addAction("✋  Interrupt", self._owner._do_interrupt)
+        m.addSeparator()
+        m.addAction("⏻  Quit", self._owner.quit_app)
+        m.exec(e.globalPos())
+
+
+class JarvisTray:
+    """The icon in the notification area: always a way back to the HUD, and the
+    everyday switches without opening it.
+
+    The design is the Nathan123y/Jarvis-for-Nathan fork's macOS menu-bar item —
+    a status line, Open, Mute, Quit, an icon that turns when muted — built on
+    Qt's `QSystemTrayIcon` instead of a separate signed Swift app, so it needs
+    no new dependency and works on Windows, where this fork is used. It matters
+    more here than there: the compact card has no taskbar button, so with the
+    HUD hidden this icon and the card are the ways back.
+
+    The window's ✕ still quits; the tray does not change that.
+    """
+
+    _ICON_PX = 32
+
+    def __init__(self, owner):
+        from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
+        self._owner = owner
+        self._last = ""
+        self._icon_key = None
+        self.tray = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray = QSystemTrayIcon()
+        self.menu = QMenu()
+        self._status = self.menu.addAction("")
+        self._status.setEnabled(False)
+        self.menu.addSeparator()
+        self._open = self.menu.addAction("⤢  Open HUD", owner.exit_compact)
+        self._compact = self.menu.addAction("▭  Compact mode", self._toggle_compact)
+        self._compact.setCheckable(True)
+        self._prompt = self.menu.addAction("⌨  Quick prompt", owner.toggle_quick_prompt)
+        self.menu.addSeparator()
+        self._mute = self.menu.addAction("🎙  Mute microphone", owner._toggle_mute)
+        self._mute.setCheckable(True)
+        orb_menu = self.menu.addMenu("🔵  Desktop orb")
+        self._orb_modes = {}
+        for mode, label in (("off", "Off"), ("speaking", "While speaking"),
+                            ("always", "Always")):
+            a = orb_menu.addAction(label, lambda m=mode: owner.set_desktop_orb_mode(m))
+            a.setCheckable(True)
+            self._orb_modes[mode] = a
+        self.menu.addSeparator()
+        self.menu.addAction("⏻  Quit", owner.quit_app)
+        self.menu.aboutToShow.connect(self._sync_menu)
+        self.tray.setContextMenu(self.menu)
+        self.tray.activated.connect(self._on_activated)
+        self.restyle()
+        self.refresh()
+        self.tray.show()
+
+    # ── look ────────────────────────────────────────────────────────────────
+
+    def restyle(self) -> None:
+        if self.tray is None:
+            return
+        self.menu.setStyleSheet(f"""
+            QMenu {{ background: {C.PANEL}; color: {C.TEXT};
+                border: 1px solid {C.BORDER_B}; padding: 4px; }}
+            QMenu::item {{ padding: 5px 22px 5px 10px; }}
+            QMenu::item:selected {{ background: {C.PRI_GHO}; color: {C.PRI}; }}
+            QMenu::item:disabled {{ color: {C.TEXT_DIM}; }}
+            QMenu::separator {{ height: 1px; background: {C.BORDER}; margin: 4px 6px; }}""")
+        self._icon_key = None
+        self.refresh()
+
+    def _state(self) -> tuple[str, str]:
+        hud = self._owner.hud
+        if hud.muted:
+            return "Microphone muted", C.MUTED_C
+        if hud.speaking:
+            return "Speaking", C.ACC
+        if hud.state in ("THINKING", "PROCESSING"):
+            return "Thinking", C.ACC2
+        if hud.state == "LISTENING":
+            return "Listening", C.GREEN
+        return hud.state.title(), C.PRI
+
+    def _icon(self, colour: str):
+        """A ring in the state colour around the theme's main colour — drawn,
+        so it needs no image file and follows the theme."""
+        from PyQt6.QtGui import QIcon
+        n = self._ICON_PX
+        pm = QPixmap(n, n)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(qcol(C.BG)))
+        p.drawEllipse(QRectF(1, 1, n - 2, n - 2))
+        p.setPen(QPen(qcol(colour), 4.0))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(4, 4, n - 8, n - 8))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(qcol(C.PRI)))
+        p.drawEllipse(QRectF(n * 0.36, n * 0.36, n * 0.28, n * 0.28))
+        p.end()
+        return QIcon(pm)
+
+    def refresh(self) -> None:
+        """Icon and tooltip for the current state; cheap when nothing changed."""
+        if self.tray is None:
+            return
+        text, colour = self._state()
+        key = (colour, C.PRI, C.BG)
+        if key != self._icon_key:
+            self._icon_key = key
+            self.tray.setIcon(self._icon(colour))
+        name = self._owner._assistant_name.upper()
+        tip = f"{name} — {text}"
+        if self._last:
+            tip += "\n" + self._last
+        # Windows cuts tray tooltips at 127 characters.
+        self.tray.setToolTip(tip if len(tip) <= 127 else tip[:124] + "…")
+
+    def show_line(self, line: str) -> None:
+        """The latest reply goes into the tooltip, so a glance answers it."""
+        speaker, sep, message = str(line).partition(":")
+        if sep and speaker.strip().lower() in (self._owner._assistant_name.lower(),
+                                                "jarvis", "j.a.r.v.i.s"):
+            self._last = " ".join(message.split())
+            self.refresh()
+
+    def hide(self) -> None:
+        # An icon left behind by a process that exited stays in the tray until
+        # the mouse passes over it.
+        if self.tray is not None:
+            self.tray.hide()
+
+    # ── actions ─────────────────────────────────────────────────────────────
+
+    def _sync_menu(self) -> None:
+        o = self._owner
+        text, _ = self._state()
+        self._status.setText(f"{o._assistant_name.upper()} — {text}")
+        self._mute.setChecked(o.hud.muted)
+        self._compact.setChecked(o._compact.isVisible())
+        mode = getattr(o._desk_orb, "mode", "speaking")
+        for m, a in self._orb_modes.items():
+            a.setChecked(m == mode)
+        hk = getattr(o, "_quick_prompt_key_label", "")
+        self._prompt.setText("⌨  Quick prompt" + (f"   [{hk}]" if hk else ""))
+
+    def _toggle_compact(self) -> None:
+        if self._owner._compact.isVisible():
+            self._owner.exit_compact()
+        else:
+            self._owner.enter_compact()
+
+    def _on_activated(self, reason) -> None:
+        from PyQt6.QtWidgets import QSystemTrayIcon
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            # A click on the icon means "show me JARVIS": the HUD, raised.
+            self._owner.exit_compact()
+
+
+class QuickPrompt(QWidget):
+    """A one-line box in the middle of the screen: type, Enter, gone.
+
+    From the omygod9138/Mark-L fork's Spotlight-style prompt. The text takes the
+    same path as the HUD's own input box. Kept from the fork: the size, the
+    place (centred, a little above the middle), Esc or clicking away to close.
+    Changed: the hotkey is `core.hotkey.GlobalHotkey` (Windows' RegisterHotKey)
+    instead of pynput — no new dependency, the key no longer also reaches the
+    app in front, and it no longer fires twice when the HUD has focus.
+    """
+
+    _W = 580
+
+    def __init__(self, owner):
+        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                 | Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(None, flags)
+        self._owner = owner
+        self._was_active = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedWidth(int(self._W * (1.0 + (_UI_SCALE - 1.0) * 0.5)))
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(10)
+        self._icon = QLabel("⌨")
+        self._icon.setFont(_font(14))
+        lay.addWidget(self._icon)
+        self.edit = QLineEdit()
+        self.edit.setFont(_font(12))
+        self.edit.setFrame(False)
+        self.edit.returnPressed.connect(self._submit)
+        lay.addWidget(self.edit, stretch=1)
+        self.restyle()
+        self.hide()
+
+    def restyle(self) -> None:
+        name = self._owner._assistant_name
+        self.edit.setPlaceholderText(f"Ask {name}…   Enter to send · Esc to close")
+        self._icon.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self.edit.setStyleSheet(f"""
+            QLineEdit {{ background: transparent; color: {C.TEXT}; border: none;
+                selection-background-color: {C.PRI_DIM}; }}""")
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(qcol(C.PRI_DIM), 1.4))
+        p.setBrush(QBrush(qcol(C.BG, 246)))
+        p.drawRoundedRect(QRectF(0.7, 0.7, self.width() - 1.4, self.height() - 1.4), 12, 12)
+        p.end()
+
+    def toggle(self) -> None:
+        if self.isVisible():
+            self.hide()
+        else:
+            self.popup()
+
+    def popup(self) -> None:
+        screen = (QGuiApplication.screenAt(QCursor.pos())
+                  or QGuiApplication.primaryScreen())
+        self.adjustSize()
+        if screen is not None:
+            a = screen.availableGeometry()
+            self.move(a.left() + (a.width() - self.width()) // 2,
+                      a.top() + int(a.height() * 0.28))
+        self._was_active = False
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if _OS == "Windows":
+            # Qt's activateWindow only asks; the hotkey press made this
+            # process the one allowed to take the foreground, so take it.
+            try:
+                import ctypes
+                ctypes.windll.user32.SetForegroundWindow(int(self.winId()))
+            except Exception:
+                pass
+        self.edit.setFocus()
+        self.edit.selectAll()
+
+    def _submit(self) -> None:
+        text = self.edit.text().strip()
+        self.edit.clear()
+        self.hide()
+        if text:
+            self._owner.submit_text(text)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.hide()
+            return
+        super().keyPressEvent(e)
+
+    def changeEvent(self, e):
+        # Clicking anywhere else closes it — but only once it has really had
+        # the focus, or a popup that Windows kept in the background would
+        # vanish before anyone could type into it.
+        super().changeEvent(e)
+        if e.type() == e.Type.ActivationChange:
+            if self.isActiveWindow():
+                self._was_active = True
+            elif self._was_active and self.isVisible():
+                self.hide()
 
 
 class MetricBar(QWidget):
@@ -3626,6 +4200,7 @@ class MainWindow(QMainWindow):
     _video_mute_sig  = pyqtSignal(bool)
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
+    _quick_prompt_sig = pyqtSignal()         # global hotkey thread → toggle the prompt
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
     _chime_sig      = pyqtSignal()           # woken by voice — play the system chime
@@ -3927,6 +4502,17 @@ class MainWindow(QMainWindow):
         self._log_sig.connect(self._log.append_log)
         self._log_sig.connect(self._on_caption_line)
         self._desk_orb = DesktopOrb(self)
+        self._compact = CompactCard(self)
+        self._log_sig.connect(self._compact.caption.show_line)
+        self._quick_prompt = QuickPrompt(self)
+        self._quick_prompt_sig.connect(self.toggle_quick_prompt)
+        self._quick_hotkey = None
+        self._quick_shortcuts = []
+        self._quick_prompt_key_label = ""
+        self._setup_quick_prompt_key(announce=False)
+        self._tray = JarvisTray(self)
+        self._log_sig.connect(self._tray.show_line)
+        QApplication.instance().aboutToQuit.connect(self._tray.hide)
         try:
             from memory.config_manager import get_desktop_orb_mode
             self._desk_orb.mode = get_desktop_orb_mode()
@@ -3971,6 +4557,8 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
+        sc_comp = QShortcut(QKeySequence("F10"), self)
+        sc_comp.activated.connect(self.enter_compact)
 
     def _show_camera_frame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -4688,6 +5276,17 @@ class MainWindow(QMainWindow):
         self._ctrl_btn.clicked.connect(self._toggle_controls)
         lay.addSpacing(4)
         lay.addWidget(self._ctrl_btn)
+
+        self._compact_btn = QPushButton("▭")
+        self._compact_btn.setFixedSize(26, 26)
+        self._compact_btn.setFont(_font(11))
+        self._compact_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._compact_btn.setToolTip("Compact mode — a small card on top of "
+                                     "other windows instead of the HUD [F10]")
+        self._compact_btn.setStyleSheet(self._drawer_btn.styleSheet())
+        self._compact_btn.clicked.connect(self.enter_compact)
+        lay.addSpacing(4)
+        lay.addWidget(self._compact_btn)
         lay.addStretch()
 
         mid = QVBoxLayout(); mid.setSpacing(1)
@@ -5032,6 +5631,8 @@ class MainWindow(QMainWindow):
         self._caption_btn.clicked.connect(self._toggle_captions)
         self._desk_orb_btn = _row(QPushButton())
         self._desk_orb_btn.clicked.connect(self._toggle_desktop_orb)
+        self._quick_key_btn = _row(QPushButton())
+        self._quick_key_btn.clicked.connect(self._cycle_quick_prompt_key)
         self._refresh_look_btns()
 
         w.adjustSize()
@@ -5613,7 +6214,7 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
+        lay.addWidget(_fl("[F4] Mute  ·  [F10] Compact  ·  [F11] Fullscreen"))
         lay.addStretch()
         lay.addWidget(_fl("By FatihMakes", C.PRI_DIM))
         return w
@@ -5971,6 +6572,15 @@ class MainWindow(QMainWindow):
         self._desk_orb_btn.setStyleSheet(off_style if mode == "off" else style)
         self._desk_orb_btn.setToolTip(f"{tip} Click to cycle: while speaking, "
                                       "always, off.")
+        from memory.config_manager import get_quick_prompt_key
+        key = get_quick_prompt_key()
+        self._quick_key_btn.setText(f"{'□' if key == 'off' else '⌨'}  QUICK PROMPT: "
+                                    f"{key.upper()}")
+        self._quick_key_btn.setStyleSheet(off_style if key == "off" else style)
+        self._quick_key_btn.setToolTip(
+            "The key that opens a one-line prompt in the middle of the screen, "
+            "from any app. Click to cycle: F9, Ctrl+Alt+J, off (F9 is also an "
+            "IDE debugger key).")
         pct = int(round(get_ui_scale() * 100))
         self._scale_btn.setText(f"🔠  TEXT SIZE: {pct}%")
         self._scale_btn.setStyleSheet(style)
@@ -5994,6 +6604,9 @@ class MainWindow(QMainWindow):
         self._style_mute_btn()
         self._style_interrupt_btn()
         self._caption._restyle(C.TEXT)
+        self._compact.restyle()
+        self._tray.restyle()
+        self._quick_prompt.restyle()
         self._refresh_hud_btn()
         self._refresh_look_btns()
         self._log.append_log(f"SYS: Theme set to {want}.")
@@ -6010,11 +6623,13 @@ class MainWindow(QMainWindow):
         self._log.append_log(f"SYS: Captions {'on' if want else 'off'}.")
 
     def _toggle_desktop_orb(self):
-        from memory.config_manager import (DESKTOP_ORB_MODES, get_desktop_orb_mode,
-                                           save_desktop_orb_mode)
+        from memory.config_manager import DESKTOP_ORB_MODES, get_desktop_orb_mode
         cur = get_desktop_orb_mode()
-        want = DESKTOP_ORB_MODES[(DESKTOP_ORB_MODES.index(cur) + 1)
-                                 % len(DESKTOP_ORB_MODES)]
+        self.set_desktop_orb_mode(DESKTOP_ORB_MODES[(DESKTOP_ORB_MODES.index(cur) + 1)
+                                                    % len(DESKTOP_ORB_MODES)])
+
+    def set_desktop_orb_mode(self, want: str):
+        from memory.config_manager import save_desktop_orb_mode
         save_desktop_orb_mode(want)
         self._desk_orb.mode = want
         self._desk_orb.wake()
@@ -6023,6 +6638,17 @@ class MainWindow(QMainWindow):
                               "speaking": "SYS: Desktop orb shows while JARVIS speaks.",
                               "always": "SYS: Desktop orb always shows when this "
                                         "window is out of sight."}[want])
+
+    def _cycle_quick_prompt_key(self):
+        from memory.config_manager import (QUICK_PROMPT_KEYS, get_quick_prompt_key,
+                                           save_quick_prompt_key)
+        cur = get_quick_prompt_key()
+        want = QUICK_PROMPT_KEYS[(QUICK_PROMPT_KEYS.index(cur) + 1) % len(QUICK_PROMPT_KEYS)]
+        save_quick_prompt_key(want)
+        self._setup_quick_prompt_key()
+        if want == "off":
+            self._log_sig.emit("SYS: Quick prompt key off — it is still in the tray menu.")
+        self._refresh_look_btns()
 
     def _cycle_ui_scale(self):
         from memory.config_manager import UI_SCALES, get_ui_scale, save_ui_scale
@@ -6232,6 +6858,8 @@ class MainWindow(QMainWindow):
             self._sub_lbl.setText("Personal AI Assistant")
         self._log._ai_name_lc = self._assistant_name.lower()
         self._caption.set_assistant_name(self._assistant_name)
+        self._compact.set_name(self._assistant_name)
+        self._quick_prompt.restyle()
         self.hud._assistant_name = display
 
         color_changed = False
@@ -6332,6 +6960,10 @@ class MainWindow(QMainWindow):
         ov.answered.connect(self._on_confirm_answered)
         self._centre_overlay(ov)
         self._confirm_overlay = ov
+        # In compact mode the HUD is hidden, and a gate nobody can see would
+        # leave the action hanging: bring the HUD back with it.
+        if self._compact.isVisible():
+            self.exit_compact()
 
     def _hide_confirm_banner(self):
         ov = getattr(self, "_confirm_overlay", None)
@@ -6472,9 +7104,57 @@ class MainWindow(QMainWindow):
         txt = self._input.text().strip()
         if not txt: return
         self._input.clear()
-        self._log.append_log(f"You: {txt}")
+        self.submit_text(txt)
+
+    def submit_text(self, txt: str):
+        """Send typed text to the assistant — the HUD's box and the quick
+        prompt both come through here."""
+        self._log_sig.emit(f"You: {txt}")
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
+
+    def toggle_quick_prompt(self):
+        self._quick_prompt.toggle()
+
+    def _setup_quick_prompt_key(self, announce: bool = True):
+        """(Re)bind the quick-prompt key: system-wide on Windows when the key
+        is free, else as a shortcut inside the HUD and the card."""
+        from core.hotkey import GlobalHotkey, chord_label, parse_chord, qt_sequence
+        from memory.config_manager import get_quick_prompt_key
+        if self._quick_hotkey is not None:
+            self._quick_hotkey.stop()
+            self._quick_hotkey = None
+        for sc in self._quick_shortcuts:
+            sc.setEnabled(False)
+            sc.deleteLater()
+        self._quick_shortcuts = []
+        key = get_quick_prompt_key()
+        chord = parse_chord(key) if key != "off" else ()
+        self._quick_prompt_key_label = chord_label(chord) if chord else ""
+        self._quick_prompt_scope = "off"
+        if not chord:
+            return
+        hk = GlobalHotkey(self._quick_prompt_sig.emit, chord)
+        self._quick_prompt_scope = hk.start()
+        if self._quick_prompt_scope == "global":
+            # Windows delivers the key to us wherever the focus is — a Qt
+            # shortcut as well would toggle the prompt twice.
+            self._quick_hotkey = hk
+        else:
+            for w in (self, self._compact):
+                sc = QShortcut(QKeySequence(qt_sequence(chord)), w)
+                sc.activated.connect(self.toggle_quick_prompt)
+                self._quick_shortcuts.append(sc)
+            if _OS == "Windows":
+                self._log_sig.emit(
+                    f"SYS: {self._quick_prompt_key_label} is taken by another program — "
+                    "the quick prompt opens with it only inside JARVIS. "
+                    "Pick another key in CONTROLS.")
+        if announce:
+            where = ("anywhere" if self._quick_prompt_scope == "global"
+                     else "inside JARVIS")
+            self._log_sig.emit(f"SYS: Quick prompt: {self._quick_prompt_key_label} "
+                               f"({where}).")
 
     def _apply_state(self, state: str):
         self.hud.state    = state
@@ -6482,6 +7162,74 @@ class MainWindow(QMainWindow):
         orb = getattr(self, "_desk_orb", None)
         if orb is not None:
             orb.wake()
+        card = getattr(self, "_compact", None)
+        if card is not None:
+            card.refresh_state()
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tray.refresh()
+
+    # ── compact mode ─────────────────────────────────────────────────────────
+
+    def enter_compact(self):
+        """Swap the HUD for the compact card. Remembered across restarts."""
+        if not self._ready:
+            return          # first-run setup lives in the HUD
+        if getattr(self, "_confirm_overlay", None) is not None:
+            # The gate is answered on the HUD; hiding it would strand it.
+            self._log_sig.emit("SYS: Answer the confirmation first.")
+            return
+        try:
+            from memory.config_manager import save_compact_mode
+            save_compact_mode(True)
+        except Exception:
+            pass
+        self._compact.place()
+        self._compact.show()
+        self._compact.raise_()
+        # Hidden rather than minimised: the card is the way back, and a
+        # taskbar button for a window nobody can see only invites confusion.
+        self.hide()
+
+    def exit_compact(self):
+        """Back to the full HUD, where the card was."""
+        try:
+            from memory.config_manager import save_compact_mode
+            save_compact_mode(False)
+        except Exception:
+            pass
+        self._compact.hide()
+        if self.isMinimized() or self.isFullScreen():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    # Printed when the event loop ends, so an exit is never a mystery again.
+    quit_reason = "the event loop was stopped (no quit path recorded)"
+
+    def closeEvent(self, event):
+        # The ✕ still quits, as it always has — now on purpose rather than
+        # through Qt's last-window rule, which is switched off (JarvisUI).
+        super().closeEvent(event)
+        if event.isAccepted():
+            if self.quit_reason.startswith("the event loop"):
+                self.quit_reason = "the window was closed"
+            self._quit_now()
+
+    def quit_app(self, reason: str = "Quit from the card or the tray"):
+        """Quit from the card or the tray: the same exit as the window's ✕."""
+        self.quit_reason = reason
+        self.close()
+
+    def _quit_now(self):
+        self._compact.hide()
+        self._quick_prompt.hide()
+        self._tray.hide()
+        if self._quick_hotkey is not None:
+            self._quick_hotkey.stop()
+        QApplication.quit()
 
     def changeEvent(self, event):
         # Minimised or sent behind another app mid-answer: the desktop orb
@@ -6552,9 +7300,23 @@ class JarvisUI:
     def __init__(self, face_path: str, size=None):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
+        # Quitting is explicit — the window's ✕ (MainWindow.closeEvent), Quit
+        # on the card or the tray, or the shutdown tool. Qt's default quits as
+        # soon as the last *visible* ordinary window closes, and in compact
+        # mode the HUD is hidden: then any passing top-level window that closed
+        # ended the whole program, silently. A live session did exactly that.
+        self._app.setQuitOnLastWindowClosed(False)
+        self._app.aboutToQuit.connect(
+            lambda: print(f"[UI] Quitting — {self._win.quit_reason}", flush=True))
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
         self._win.show()
+        try:
+            from memory.config_manager import get_compact_mode
+            if get_compact_mode():
+                self._win.enter_compact()
+        except Exception:
+            pass
 
     @property
     def muted(self) -> bool:

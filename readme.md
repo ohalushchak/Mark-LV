@@ -51,6 +51,9 @@ It's not just an assistant — it's an extension of your digital life.
 | 🎙️ Real-time Voice | Ultra-low latency conversation in any language via Gemini Live API |
 | 🎨 Live Theming | Recolour the entire HUD from a hue wheel or hex — the avatar retints with it. A soft, low-glare slate theme sits beside the original neon |
 | 🔠 Readable Text | One TEXT SIZE setting (100–150 %) for every label, a crisp per-OS monospace font, and captions that type the latest answer under the HUD in large text |
+| ▭ Compact Mode | Swap the HUD for a small card that stays on top: the orb, the state and the last reply, with HUD / MUTE / STOP on hover and a right-click menu; an action that needs CONFIRM brings the HUD back. Drag it anywhere — it remembers the spot and the mode (header ▭ or F10) |
+| 🛎️ Tray Icon | A notification-area icon coloured by state, with the latest reply in its tooltip and Open HUD, compact mode, quick prompt, mute, desktop orb and Quit in its menu |
+| ⌨️ Quick Prompt | Press F9 (or Ctrl+Alt+J) in any app: a one-line box opens mid-screen, Enter sends it to JARVIS, waking it if it was asleep |
 | 🔵 Desktop Orb | With the JARVIS window minimised or behind another app, a small orb at the top of your screen shows it talking — only while it speaks, or all the time (listening, thinking, muted) |
 | 〰️ Reactive HUD | Waveform pulses to real audio — your mic while listening, JARVIS while speaking |
 | 🎙️ Voice Picker | Choose from 5 native Gemini voices and switch live from the UI — no restart |
@@ -103,7 +106,7 @@ So there are two players running together, with a timer that corrects any drift 
 The microphone is open while a video plays, so the moment you turn the sound on, JARVIS starts answering the film. The mic now mutes itself when the video's sound goes on and unmutes when it goes off — and it says so in the activity log rather than going deaf silently.
 
 #### 🎛 Two drawers instead of one
-⚙ **SETUP** holds the things you set once — remote control, desktop shortcut, auto-start, customisation and wake-word setup. 🎛 **CONTROLS** holds the switches you flick daily — fullscreen, morning brief, wake word, sleep, push-to-talk, interrupt mode, HUD style, theme, text size, captions and the desktop orb. Only one is open at a time, and each sits under its own header button.
+⚙ **SETUP** holds the things you set once — remote control, desktop shortcut, auto-start, customisation and wake-word setup. 🎛 **CONTROLS** holds the switches you flick daily — fullscreen, morning brief, wake word, sleep, push-to-talk, interrupt mode, HUD style, theme, text size, captions, the desktop orb and the quick-prompt key. Only one is open at a time, and each sits under its own header button.
 
 The panel used to stutter when it opened, and the obvious explanation — too many buttons — was wrong. Measured, the **first** wake-word state check took **2.104 seconds**, because it imported `openwakeword` on the UI thread the moment the drawer was built. That import now happens off-thread at boot, and the drawer opens instantly whether it has six buttons or sixteen.
 
@@ -347,7 +350,7 @@ Mark LV/
 │   ├── face_model.obj        # The face itself (MediaPipe canonical model, Apache-2.0, 25 KB)
 │   ├── viseme.py             # Transcript → mouth shapes, fused with the audio's timing
 │   ├── echo.py               # Tells your voice from the assistant's own echo; self-calibrating
-│   ├── hotkey.py             # Push-to-talk chord — global on Windows, windowed fallback elsewhere
+│   ├── hotkey.py             # Push-to-talk chord and the quick-prompt key — global on Windows, windowed fallback elsewhere
 │   ├── undo.py               # One shared undo stack — actions register how to reverse themselves
 │   ├── confirm.py            # Irreversible-action gate — the token is issued by the UI, not the model
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name

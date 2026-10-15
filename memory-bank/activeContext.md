@@ -6,11 +6,15 @@ _Last updated: 2026-10-14_
 
 ## Current focus
 
-- HUD redesign merged into `main` and tried live: orb and anime styles beside the head and reactor, a livelier head, a soft theme, per-OS font and TEXT SIZE, captions, and a desktop orb with modes off / while speaking / always.
-- Earlier work, also in `main`: voice barge-in robust to background sounds (tried live), screenshots of the monitor under the cursor, `close_app` by name with verification.
+- Compact mode merged into `main` and tried live on Windows: the card (drag, restore, hover buttons, menu), the tray icon, and the F9 quick prompt, which now wakes a sleeping assistant. The confirm gate is not on the card (the user did not want it); a gate brings the HUD back. Quitting is explicit after a run that ended silently in compact mode.
+- In `main`: the HUD redesign (tried live), voice barge-in, monitor-under-cursor screenshots, `close_app` by name.
 
 ## Recent decisions
 
+- Compact mode: the window's ✕ keeps quitting (the user's choice); the card hides the HUD instead of minimising it, so the card and the tray icon are the ways back. Windows is the target platform — no macOS-specific code from the forks.
+- Qt's quit-on-last-window-closed is off; the ✕, Quit (card/tray) and `shutdown_jarvis` are the only exits. The exact window whose closing ended that run was not identified — the `[UI] Quitting — …` line will show if anything else stops the loop.
+- Typed text (HUD box or quick prompt) wakes a sleeping assistant; before, it was refused with a log note.
+- The quick prompt uses `RegisterHotKey`, not polling: the key is swallowed from the app in front, and the press grants the foreground the popup needs.
 - HUD redesign took pieces, not a whole fork: no fork had a redesign worth taking entire (spyduck007's particle core costs ~2,300 translucent draws a frame; senthuran-ukr, Wildanel321 and Diegodevcyber were heavy, broken or rebrands). The head stays the default style; the anime face and soft theme are opt-in. Layout changes that hid the activity log were not taken.
 - The state while talking is "SPEAKING" (`MainWindow._apply_state`); renderers get the `speaking` flag rather than parsing the state.
 - The misfires in the first real session log came from local barge-in, not the server: each on exactly the then-minimum 5 blocks (≈0.32 s), after ~8 s and ~12 s of the assistant talking — so the evidence length and the cost of a false trigger were the problem, not calibration time.
@@ -22,6 +26,7 @@ _Last updated: 2026-10-14_
 
 ## Next steps
 
+- Investigate the frequent Live disconnects (`1008 The operation was aborted`, four in one session on 2026-10-15, mostly right after connecting while asleep): add timestamps, see what precedes them.
 - Monitor choice for `screen_process` — deferred; the plan is in `progress.md` → Fork backlog.
 - Try interrupt-by-name live, and each wake engine on a real microphone (a Ukrainian name on Vosk and on sherpa).
 - Pick the next feature from the upstream "LVI+" roadmap (see `progress.md`).

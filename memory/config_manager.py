@@ -285,6 +285,49 @@ def save_desktop_orb_mode(mode: str) -> None:
     _save_flag("desktop_orb_mode", m if m in DESKTOP_ORB_MODES else "speaking")
 
 
+def get_compact_mode() -> bool:
+    """Whether JARVIS starts as the compact card instead of the full HUD —
+    the mode it was left in."""
+    return bool(load_api_keys().get("compact_mode", False))
+
+
+def save_compact_mode(enabled: bool) -> None:
+    _save_flag("compact_mode", bool(enabled))
+
+
+def get_compact_pos() -> tuple[int, int] | None:
+    """Where the compact card was last dragged to, in screen coordinates."""
+    v = load_api_keys().get("compact_pos")
+    try:
+        x, y = int(v[0]), int(v[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+    return x, y
+
+
+def save_compact_pos(x: int, y: int) -> None:
+    _save_flag("compact_pos", [int(x), int(y)])
+
+
+# The key that opens the quick prompt from anywhere, in button order. F9 by
+# default; IDEs use it too (VS Code: breakpoint, IntelliJ: resume), hence the
+# alternative. "off" leaves the prompt to the tray menu.
+QUICK_PROMPT_KEYS = ("F9", "Ctrl+Alt+J", "off")
+
+
+def get_quick_prompt_key() -> str:
+    v = str(load_api_keys().get("quick_prompt_key", "F9")).strip()
+    for k in QUICK_PROMPT_KEYS:
+        if v.lower() == k.lower():
+            return k
+    return "F9"
+
+
+def save_quick_prompt_key(key: str) -> None:
+    k = str(key or "").strip()
+    _save_flag("quick_prompt_key", k if k in QUICK_PROMPT_KEYS else "F9")
+
+
 # Text size multipliers. Capped at 150 %: the HUD's buttons and rows have fixed
 # heights, and past that their labels start to clip.
 UI_SCALES = (1.0, 1.15, 1.3, 1.5)
