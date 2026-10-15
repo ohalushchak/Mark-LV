@@ -588,7 +588,16 @@ def code_helper(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "code_helper",
-    "description": "Writes, edits, explains, runs, or builds code files.",
+    "description": (
+        "Writes a single new code file from a description (saved to the "
+        "Desktop unless a path is given), explains or optimises a piece of "
+        "code, runs one script, or debugs from a screenshot. Use for 'write me "
+        "a script that…' and 'explain this code'. For changes inside an "
+        "existing project use project_workspace (read + patch); for a new "
+        "multi-file project use dev_agent; for a large change across a "
+        "project use delegate_to_agent; to run tests or commands use "
+        "run_command."
+    ),
     "parameters": {
         "type": "OBJECT",
         "properties": {

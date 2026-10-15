@@ -54,6 +54,10 @@ It's not just an assistant — it's an extension of your digital life.
 | ▭ Compact Mode | Swap the HUD for a small card that stays on top: the orb, the state and the last reply, with HUD / MUTE / STOP on hover and a right-click menu; an action that needs CONFIRM brings the HUD back. Drag it anywhere — it remembers the spot and the mode (header ▭ or F10) |
 | 🛎️ Tray Icon | A notification-area icon coloured by state, with the latest reply in its tooltip and Open HUD, compact mode, quick prompt, mute, desktop orb and Quit in its menu |
 | ⌨️ Quick Prompt | Press F9 (or Ctrl+Alt+J) in any app: a one-line box opens mid-screen, Enter sends it to JARVIS, waking it if it was asleep |
+| 💻 Coding by Voice | Open a project by name ("open project Mark LIV"), search and read its files, make exact edits you can undo, run commands and tests, and use git — status, diffs, commits and branches you can undo, push and draft pull requests behind CONFIRM. Commands that only read run at once, ones that change things wait for CONFIRM, destructive ones are refused; a long build keeps running and is announced when it ends |
+| 🤖 Coding Agents | Hand a large job to **Claude Code** or **Codex**: JARVIS asks first, the agent works in the background on your own plan, and the outcome is spoken when it is done. The AGENT panel switches the agent, its model and effort, and shows the 5-hour and weekly usage limits |
+| 🔔 Agent Sessions | Optional: your own Claude Code and Codex sessions are announced when a long turn ends or when they are waiting for your permission (a hook, switched on in CONTROLS) |
+| 💬 Ask ChatGPT / Claude | "Ask ChatGPT …" copies the question and opens the app for you to send — it says plainly that it cannot read the answer back |
 | 🔵 Desktop Orb | With the JARVIS window minimised or behind another app, a small orb at the top of your screen shows it talking — only while it speaks, or all the time (listening, thinking, muted) |
 | 〰️ Reactive HUD | Waveform pulses to real audio — your mic while listening, JARVIS while speaking |
 | 🎙️ Voice Picker | Choose from 5 native Gemini voices and switch live from the UI — no restart |
@@ -106,7 +110,7 @@ So there are two players running together, with a timer that corrects any drift 
 The microphone is open while a video plays, so the moment you turn the sound on, JARVIS starts answering the film. The mic now mutes itself when the video's sound goes on and unmutes when it goes off — and it says so in the activity log rather than going deaf silently.
 
 #### 🎛 Two drawers instead of one
-⚙ **SETUP** holds the things you set once — remote control, desktop shortcut, auto-start, customisation and wake-word setup. 🎛 **CONTROLS** holds the switches you flick daily — fullscreen, morning brief, wake word, sleep, push-to-talk, interrupt mode, HUD style, theme, text size, captions, the desktop orb and the quick-prompt key. Only one is open at a time, and each sits under its own header button.
+⚙ **SETUP** holds the things you set once — remote control, desktop shortcut, auto-start, customisation and wake-word setup. 🎛 **CONTROLS** holds the switches you flick daily — fullscreen, morning brief, wake word, sleep, push-to-talk, interrupt mode, HUD style, theme, text size, captions, the desktop orb, the quick-prompt key and agent-session announcements. Only one is open at a time, and each sits under its own header button.
 
 The panel used to stutter when it opened, and the obvious explanation — too many buttons — was wrong. Measured, the **first** wake-word state check took **2.104 seconds**, because it imported `openwakeword` on the UI thread the moment the drawer was built. That import now happens off-thread at boot, and the drawer opens instantly whether it has six buttons or sixteen.
 
@@ -335,6 +339,13 @@ Mark LV/
 │   ├── send_message.py       # Messaging integration
 │   ├── weather_report.py     # Live weather data
 │   ├── video_player.py       # Plays video on the HUD, where the avatar normally is
+│   ├── code_helper.py        # A single new script from a description; explain, run, screenshot-debug
+│   ├── dev_agent.py          # A new multi-file project from scratch, run and fixed until it works
+│   ├── project_workspace.py  # Open a project; list, search, read and exactly edit its files (undoable)
+│   ├── run_command.py        # Terminal commands under core/shell_policy.py; background jobs; a visible terminal
+│   ├── git_project.py        # Status, diff, log, branches, commits (undoable), push and draft PRs behind CONFIRM
+│   ├── delegate_to_agent.py  # Large coding jobs to Claude Code or Codex; agent, model, effort, usage limits
+│   ├── ask_chat_app.py       # Hands a question to the ChatGPT or Claude app via the clipboard
 │   └── desktop.py            # Desktop and taskbar control
 ├── memory/
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
@@ -353,6 +364,14 @@ Mark LV/
 │   ├── hotkey.py             # Push-to-talk chord and the quick-prompt key — global on Windows, windowed fallback elsewhere
 │   ├── undo.py               # One shared undo stack — actions register how to reverse themselves
 │   ├── confirm.py            # Irreversible-action gate — the token is issued by the UI, not the model
+│   ├── projects.py           # The current project: found by a forgiving name, remembered
+│   ├── shell_policy.py       # Which commands run at once, wait for CONFIRM, or are refused
+│   ├── jobs.py               # Background commands — output tail, timeout, process-tree stop
+│   ├── announce.py           # Results that arrive later, spoken once the room is quiet
+│   ├── activity.py           # Who spoke last — "did the user answer after the question?"
+│   ├── agents.py             # Claude Code / Codex runs, models and efforts, usage limits
+│   ├── agent_relay.py        # Announces your own agent sessions; installs the hook into both CLIs
+│   ├── agent_hook.py         # The hook Claude Code and Codex run — drops events into ~/.jarvis/agent_queue
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
@@ -386,7 +405,7 @@ Everything stays on your machine. There is no MARK server, no telemetry and no a
 
 All three are listed in `.gitignore`, so a fork or a pull request cannot leak them by accident. **If you have already committed `config/api_keys.json` anywhere public, revoke that key** at [aistudio.google.com](https://aistudio.google.com/app/apikey) and generate a new one — removing the file in a later commit does not remove it from the history.
 
-Your voice is streamed to Google's Gemini Live API while a session is open; that is the one thing that leaves your computer, and it stops when you mute or close the app.
+Your voice is streamed to Google's Gemini Live API while a session is open, and it stops when you mute or close the app. The coding tools add two more: file contents and command output they read go to Gemini as tool results (files with keys — `api_keys.json`, `.env`, private keys — are never read), and a job you hand to Claude Code or Codex is sent by that CLI to Anthropic or OpenAI under your own account. The agent-session hook writes its events to `~/.jarvis/agent_queue` on your machine only.
 
 ---
 

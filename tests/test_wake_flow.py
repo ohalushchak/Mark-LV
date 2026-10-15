@@ -251,3 +251,46 @@ def test_a_typed_command_wakes_the_assistant_and_is_sent():
     asyncio.run(run())
     assert order == [("wake", "typed command"), ("sent", True, "what time is it")]
     assert "SYS: Awake — typed command." in j.ui.log
+
+
+def test_an_announcement_while_asleep_stays_asleep():
+    # Agent news is spoken while asleep (by request, instead of a tray
+    # notification): the wake detector must not hear the assistant's own
+    # words, and the state goes back to SLEEPING, not LISTENING.
+    j = _jarvis()
+    j._barge = SimpleNamespace(reset=lambda: None, summary=lambda: "")
+    j._echo = SimpleNamespace(threshold=0.3, reliable=True)
+    j.set_speaking(True)
+    _blocks(j, 3)
+    assert j._wake_detector.fed == []
+    j.set_speaking(False)
+    j._tail_until = 0.0
+    _blocks(j, 2)
+    assert j._wake_detector.fed == [4, 5]
+    assert j.ui.states[-2:] == ["SPEAKING", "SLEEPING"] and not j._awake
+
+
+def test_the_server_hears_that_the_mic_stopped():
+    # Asleep, nothing is streamed; without audio_stream_end the server waited
+    # for audio and aborted the session (1008) after announcements.
+    j = _jarvis()
+    sent = []
+    loop = asyncio.new_event_loop()
+    j._loop = loop
+
+    class _Session:
+        async def send_realtime_input(self, **kw):
+            sent.append(kw)
+    j.session = _Session()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    try:
+        j._answer_ended_at = 0.0
+        j._on_answer_finished()                       # an announcement while asleep
+        for _ in range(50):
+            if sent:
+                break
+            time.sleep(0.02)
+        assert sent == [{"audio_stream_end": True}]
+    finally:
+        loop.call_soon_threadsafe(loop.stop)

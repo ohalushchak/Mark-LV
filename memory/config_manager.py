@@ -582,3 +582,75 @@ def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
     plugins_cfg[plugin_name] = enabled
     data["plugins_enabled"] = plugins_cfg
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+# ── Coding: the current project ─────────────────────────────────────────────
+# One folder the coding tools work in until another is named, so a voice
+# request ("run the tests", "what changed?") never needs a path. Kept across
+# restarts with a short list of recent ones, which also resolves names that
+# live outside the usual project folders.
+
+def get_current_project() -> str:
+    return str(load_api_keys().get("current_project") or "").strip()
+
+
+def save_current_project(path: str) -> None:
+    p = str(path or "").strip()
+    data = load_api_keys()
+    recent = [r for r in data.get("recent_projects") or [] if isinstance(r, str) and r != p]
+    if p:
+        recent.insert(0, p)
+    _save_flag("recent_projects", recent[:12])
+    _save_flag("current_project", p)
+
+
+def get_recent_projects() -> list[str]:
+    v = load_api_keys().get("recent_projects") or []
+    return [r for r in v if isinstance(r, str) and r.strip()]
+
+
+def get_project_dirs() -> list[str]:
+    """Extra folders to look for projects in, on top of the usual ones."""
+    v = load_api_keys().get("project_dirs") or []
+    return [d for d in v if isinstance(d, str) and d.strip()]
+
+
+# ── Coding agents (Claude Code / Codex) ─────────────────────────────────────
+# Model and effort are kept per engine, so switching to Codex and back keeps
+# Claude's choice. "" means "whatever that CLI is configured to use".
+
+AGENT_ENGINES = ("claude", "codex")
+
+
+def get_agent_settings() -> dict:
+    raw = load_api_keys().get("agents")
+    raw = raw if isinstance(raw, dict) else {}
+    engine = str(raw.get("engine") or "claude").strip().lower()
+    out = {
+        "engine": engine if engine in AGENT_ENGINES else "claude",
+        "timeout_min": 20,
+        "relay_enabled": bool(raw.get("relay_enabled", False)),
+        "relay_min_turn_s": 30,
+    }
+    try:
+        out["timeout_min"] = max(1, min(240, int(raw.get("timeout_min", 20))))
+    except (TypeError, ValueError):
+        pass
+    try:
+        out["relay_min_turn_s"] = max(0, min(3600, int(raw.get("relay_min_turn_s", 30))))
+    except (TypeError, ValueError):
+        pass
+    for eng in AGENT_ENGINES:
+        out[f"{eng}_model"] = str(raw.get(f"{eng}_model") or "").strip()
+        out[f"{eng}_effort"] = str(raw.get(f"{eng}_effort") or "").strip().lower()
+    usage = raw.get("usage")
+    out["usage"] = usage if isinstance(usage, dict) else {}
+    return out
+
+
+def save_agent_settings(**values) -> None:
+    """Merge the given keys into the agents block (engine, claude_model, …)."""
+    data = load_api_keys()
+    cur = data.get("agents")
+    cur = dict(cur) if isinstance(cur, dict) else {}
+    cur.update(values)
+    _save_flag("agents", cur)
