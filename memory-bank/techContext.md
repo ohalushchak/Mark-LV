@@ -28,6 +28,15 @@ Technologies, environment and constraints. Exact package versions live in `requi
 - Both CLIs support the hook events `UserPromptSubmit`, `Stop` (with `last_assistant_message`) and `PermissionRequest`, in the same JSON format.
 - PowerShell 7 is installed (`pwsh`); `run_command` uses it, falling back to Windows PowerShell.
 - `time.monotonic()` on Windows ticks every ~16 ms: tests that order two events need a ≥50 ms gap.
+- Desktop automation facts measured on this machine (Windows 11, three monitors 2560×1600 / 3440×1440 primary / 1280×720, Ukrainian and English layouts):
+  - pycaw 2025+ returns a wrapped device with `.EndpointVolume`; the old `Activate(...)` call raises. The volume slider's 0–100 is `GetMasterVolumeLevelScalar`.
+  - pyautogui presses US-layout keys (`typewrite` under a Ukrainian layout turns "John" into "Ощрт") and builds its letter map with `VkKeyScan` at import. Unicode `SendInput` avoids the layout, but Windows 11 Notepad dropped and repeated its characters; a clipboard paste is exact.
+  - A lone Alt tap (the usual SetForegroundWindow unlock) opens the menu bar of the window in front.
+  - Windows Settings windows are ApplicationFrameHost windows titled in the system language ("Налаштування"); Store apps the same ("Калькулятор").
+  - Win11 Notepad opens a file as a tab in an existing window and restores unsaved tabs between runs.
+  - Chrome's address bar is the first UIA Edit of its window (8–30 ms, no focus change). Electron apps (Slack desktop exposes its UI; ChatGPT, Claude expose only caption buttons) vary.
+  - Slack desktop: Ctrl+K toggles the jump box (a second Ctrl+K closes it); results are UIA ListItems ("social", "Jane Doe, Direct Message", "Search for: …"); the message box is an Edit named "Message to <name>" whose value keeps emoji as `:codes:`; the window title follows a switch about a second late.
+  - Gemini vision on a 3440-px screen scaled to 1600 px: one look missed a 45-px taskbar button by ~38 px; a native-resolution crop corrects it. With thinking off the models answered from priors (a left-aligned taskbar) instead of looking.
 
 ## Constraints
 

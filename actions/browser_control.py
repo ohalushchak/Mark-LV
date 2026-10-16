@@ -965,6 +965,7 @@ def browser_control(
     if action in ("go_to", "search", "new_tab"):
         if _registry.has(browser):
             sess = _registry.get(browser)
+            _note_before(sess)
             try:
                 if action == "search":
                     result = sess.run(sess.search(params.get("query", ""),
@@ -1012,6 +1013,7 @@ def browser_control(
             except Exception as e:
                 print(f"[Browser] Could not resume last page ({last}): {e}")
 
+        _note_before(sess)
         if action == "click":
             result = sess.run(sess.click(params.get("selector"), params.get("text")))
         elif action == "type":
@@ -1058,6 +1060,216 @@ def _log(player, text: str):
     print(f"[Browser] {short}")
     if player:
         player.write_log(f"[browser] {short[:60]}")
+
+
+# ── Did it take effect? (core/verify.py) ─────────────────────────────────────
+#
+# Clicks and key presses used to report themselves ("Clicked text: 'Sign
+# in'") whatever the page did. Now:
+#
+# * In the automation window, the page is observed just before the action and
+#   again after it (url, title, a hash of the visible text, scroll position,
+#   the focused element, the document's load time). Navigation is VERIFIED by
+#   the URL, typing by reading the field back, a click by anything that moved;
+#   the verdict says where the page is now (BlackStarG5/Mark-LIV's
+#   "observed state after action").
+# * In the user's own browser (go_to / search open natively), the address bar
+#   of the browser window that came up is read through UI Automation
+#   (desktop_state.address_bar) — VERIFIED when it shows the requested site.
+#
+# The "before" of an automation action is taken inside the handler, after the
+# session has started and resumed the last page, so it is the page the action
+# really acted on; it travels to _verify on this thread (the loader runs
+# snapshot, handler and verify on one executor thread).
+
+_tl = threading.local()
+
+_OBSERVE_JS = """() => {
+  const a = document.activeElement;
+  const t = (document.body && document.body.innerText) || '';
+  let h = 0;
+  for (let i = 0; i < Math.min(t.length, 60000); i++) { h = (h * 31 + t.charCodeAt(i)) | 0; }
+  let value = null;
+  if (a && 'value' in a && a.type !== 'password') value = String(a.value);
+  else if (a && a.isContentEditable) value = a.innerText;
+  return {url: location.href, title: document.title, scroll: window.scrollY,
+          text_hash: h, text_len: t.length, t0: performance.timeOrigin,
+          active: a ? (a.tagName + '#' + (a.id || a.name || a.getAttribute('aria-label') || '')) : '',
+          value: value};
+}"""
+
+_PAGE_ACTIONS = {"click", "smart_click", "press", "back", "forward", "reload", "scroll",
+                 "type", "smart_type", "fill_form", "go_to", "search", "new_tab", "close_tab",
+                 "screenshot"}
+
+
+async def _observe(sess) -> dict:
+    page = sess._page
+    if page is None or page.is_closed():
+        return {}
+    try:
+        info = await page.evaluate(_OBSERVE_JS)
+    except Exception:
+        info = {"url": page.url}
+    try:
+        info["pages"] = len(page.context.pages)
+    except Exception:
+        pass
+    return info
+
+
+def _note_before(sess) -> None:
+    try:
+        _tl.before = (sess, sess.run(_observe(sess), timeout=10))
+    except Exception:
+        _tl.before = (sess, None)
+
+
+def _host(url: str) -> str:
+    from urllib.parse import urlparse
+    u = url if "://" in url else "https://" + url
+    h = (urlparse(u).hostname or "").lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def _nav_target(params: dict) -> str:
+    action = str(params.get("action", "")).lower().strip()
+    if action == "search":
+        base = _SEARCH_ENGINES.get(str(params.get("engine", "google")).lower(),
+                                   _SEARCH_ENGINES["google"])
+        return base + str(params.get("query", "")).replace(" ", "+")
+    return _normalize_url(str(params.get("url", "")).strip()) if params.get("url") else ""
+
+
+def _snapshot(params: dict):
+    from core import desktop_state as ds
+    _tl.before = None
+    action = str((params or {}).get("action", "")).lower().strip()
+    browser = str(params.get("browser", "") or "").lower().strip() or None
+    if action in ("go_to", "search", "new_tab") and not _registry.has(browser):
+        return {"native": {w.hwnd: w.title for w in ds.windows() if w.exe in ds.BROWSERS},
+                "fg": (ds.foreground() or {}).get("hwnd")}
+    return {}
+
+
+def _verify_native(params: dict, before: dict):
+    from core import desktop_state as ds
+    from core import verify as v
+    target = _nav_target(params)
+    if not target:
+        return None
+    if _OS != "Windows":
+        return v.unverified("I can only read the browser's address bar on Windows")
+    want = _host(target)
+
+    def look():
+        wins = [w for w in ds.windows() if w.exe in ds.BROWSERS]
+        fg = (ds.foreground() or {}).get("hwnd")
+        # The window that came up: new, in front, or retitled by the new tab.
+        moved = [w for w in wins if w.hwnd not in before["native"] or w.hwnd == fg
+                 or before["native"].get(w.hwnd) != w.title]
+        for w in moved:
+            addr = ds.address_bar(w.hwnd) or ""
+            if want and want in _host(addr):
+                return v.verified(f"{w.exe} shows {addr[:90]}")
+        if moved:
+            return v.unverified(f"{moved[0].exe} came up, but its address bar does not show {want}")
+        return v.unverified("I could not see a browser window come up")
+    return v.poll(look, timeout=5.0, interval=0.3)
+
+
+def _verify(params: dict, result, before):
+    from core import verify as v
+    action = str((params or {}).get("action", "")).lower().strip()
+    if before and "native" in before:
+        return _verify_native(params, before)
+    held = getattr(_tl, "before", None)
+    _tl.before = None
+    if action not in _PAGE_ACTIONS or held is None:
+        return None
+    sess, b = held
+    if action == "screenshot":
+        p = str(result or "").removeprefix("Screenshot saved: ").strip()
+        return (v.verified(f"the file {p} exists") if p and Path(p).is_file()
+                else v.failed("no screenshot file was written"))
+
+    def now() -> dict:
+        try:
+            return sess.run(_observe(sess), timeout=10) or {}
+        except Exception:
+            return {}
+
+    def where(a: dict) -> str:
+        t = (a.get("title") or "").strip()
+        return f"'{t[:60]}' ({a.get('url', '')[:90]})" if t else a.get("url", "")[:90]
+
+    if action in ("type", "smart_type"):
+        text = " ".join(str(params.get("text", "")).split()).casefold()
+
+        def look():
+            a = now()
+            val = a.get("value")
+            if val is None:
+                return v.unverified("the focused element does not expose its text")
+            if text and text in " ".join(val.split()).casefold():
+                return v.verified("the field now contains the text")
+            return v.failed("the field does not contain the text")
+        return v.poll(look)
+
+    if action == "fill_form":
+        fields = params.get("fields") or {}
+
+        async def read_back():
+            page = sess._page
+            out = {}
+            for sel, want in fields.items():
+                try:
+                    out[sel] = (await page.locator(sel).first.input_value(timeout=2000)) == str(want)
+                except Exception:
+                    out[sel] = None
+            return out
+        try:
+            got = sess.run(read_back(), timeout=20)
+        except Exception as e:
+            return v.unverified(f"could not read the form back ({e})")
+        bad = [s for s, ok in got.items() if ok is False]
+        unknown = [s for s, ok in got.items() if ok is None]
+        if bad:
+            return v.failed(f"these fields do not hold the value: {', '.join(bad)}")
+        if unknown:
+            return v.unverified(f"could not read back: {', '.join(unknown)}")
+        return v.verified(f"all {len(got)} fields hold their values")
+
+    b = b or {}
+
+    def look():
+        a = now()
+        if not a:
+            return v.unverified("the page could not be read after the action")
+        if action in ("go_to", "search", "new_tab") and _nav_target(params):
+            want = _host(_nav_target(params))
+            return (v.verified(f"the page is {where(a)}") if want and want in _host(a.get("url", ""))
+                    else v.failed(f"the page is {where(a)}, not {want}"))
+        if action == "close_tab":
+            return (v.verified(f"{a.get('pages')} tab(s) left, now on {where(a)}")
+                    if a.get("pages", 0) < b.get("pages", 0)
+                    else v.failed("the number of tabs did not change"))
+        if action == "scroll":
+            return (v.verified(f"the page scrolled to {int(a.get('scroll') or 0)}px")
+                    if a.get("scroll") != b.get("scroll")
+                    else v.unverified("the page did not scroll — it may be at the end"))
+        if a.get("url") != b.get("url"):
+            return v.verified(f"the page is now {where(a)}")
+        if action in ("reload", "back", "forward") and a.get("t0") != b.get("t0"):
+            return v.verified(f"the page loaded again: {where(a)}")
+        if a.get("pages", 0) != b.get("pages", 0):
+            return v.verified(f"a tab opened or closed; now on {where(a)}")
+        if a.get("title") != b.get("title") or a.get("text_hash") != b.get("text_hash"):
+            return v.verified(f"the page content changed ({where(a)})")
+        if a.get("active") != b.get("active"):
+            return v.verified("focus moved to another element on the page")
+        return v.unverified(f"the page did not change ({where(a)})")
+    return v.poll(look)
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
@@ -1129,4 +1341,6 @@ TOOL = {
         ]
     },
     "handler": browser_control,
+    "snapshot": _snapshot,
+    "verify": _verify,
 }

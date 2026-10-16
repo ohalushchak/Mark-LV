@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import platform
 from pathlib import Path
 from datetime import datetime
@@ -645,6 +646,89 @@ def get_file_info(path: str, name: str = "") -> str:
     except Exception as e:
         return f"Could not get file info: {e}"
 
+# ── Emptying the Recycle Bin / Trash ─────────────────────────────────────────
+#
+# Seen live: asked to empty the Recycle Bin, the assistant clicked through
+# Settings' cleanup list blind — ticked "Recycle Bin" AND "Downloads" (the
+# user's own files) with Ctrl+A, then pressed the Delete key, which there does
+# nothing. Emptying it is one system call; it is the one file action here that
+# cannot be undone, so it waits for CONFIRM on the HUD (core/confirm.py) and
+# is read back afterwards.
+
+def trash_info() -> tuple[int, int] | None:
+    """(items, bytes) in the Recycle Bin / Trash, or None if it cannot be read."""
+    try:
+        if platform.system() == "Windows":
+            import ctypes
+            from ctypes import wintypes
+
+            class SHQUERYRBINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD), ("i64Size", ctypes.c_longlong),
+                            ("i64NumItems", ctypes.c_longlong)]
+            info = SHQUERYRBINFO(ctypes.sizeof(SHQUERYRBINFO), 0, 0)
+            if ctypes.windll.shell32.SHQueryRecycleBinW(None, ctypes.byref(info)) != 0:
+                return None
+            return int(info.i64NumItems), int(info.i64Size)
+        trash = (Path.home() / ".Trash") if platform.system() == "Darwin" \
+            else (Path.home() / ".local" / "share" / "Trash" / "files")
+        if not trash.exists():
+            return 0, 0
+        items = list(trash.iterdir())
+        size = 0
+        for p in items:
+            try:
+                size += p.stat().st_size if p.is_file() else sum(
+                    f.stat().st_size for f in p.rglob("*") if f.is_file())
+            except Exception:
+                pass
+        return len(items), size
+    except Exception:
+        return None
+
+
+def _empty_trash_now() -> str:
+    try:
+        if platform.system() == "Windows":
+            import ctypes
+            # SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND — the
+            # HUD already asked; Windows' own dialog would ask a second time.
+            hr = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 0x1 | 0x2 | 0x4)
+            if hr not in (0, -2147418113):          # S_OK, E_UNEXPECTED (already empty)
+                return f"Could not empty the Recycle Bin (error {hr & 0xFFFFFFFF:#x})."
+        elif platform.system() == "Darwin":
+            subprocess.run(["osascript", "-e", 'tell application "Finder" to empty trash'],
+                           capture_output=True, timeout=60)
+        else:
+            base = Path.home() / ".local" / "share" / "Trash"
+            for sub in ("files", "info"):
+                d = base / sub
+                if d.exists():
+                    for p in d.iterdir():
+                        shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
+    except Exception as e:
+        return f"Could not empty the Recycle Bin: {e}"
+    left = trash_info()
+    if left is None:
+        return "Emptied the Recycle Bin; I could not read it back to confirm."
+    if left[0] == 0:
+        return "The Recycle Bin is empty now."
+    return f"The Recycle Bin still holds {left[0]} item(s) — some could not be deleted."
+
+
+def empty_trash() -> str:
+    from core import confirm
+    info = trash_info()
+    if info is not None and info[0] == 0:
+        return "The Recycle Bin is already empty. Nothing to do."
+    if confirm.pending_title():
+        return ("There is already a confirmation waiting on screen. Ask the user to answer that "
+                "one first.")
+    what = (f"{info[0]} item(s), {_format_size(info[1])}" if info else "everything in it")
+    return confirm.request(
+        key="empty_trash", title=f"Empty the Recycle Bin ({what})",
+        detail="Deleted for good — this cannot be undone.", run=_empty_trash_now)
+
+
 def file_controller(
     parameters: dict = None,
     response=None,
@@ -711,6 +795,15 @@ def file_controller(
         elif action == "organize_desktop":
             return organize_desktop()
 
+        elif action in ("empty_trash", "empty_recycle_bin"):
+            return empty_trash()
+
+        elif action == "trash_info":
+            info = trash_info()
+            if info is None:
+                return "I could not read the Recycle Bin."
+            return f"The Recycle Bin holds {info[0]} item(s), {_format_size(info[1])}."
+
         elif action == "info":
             return get_file_info(path, name=name)
 
@@ -721,16 +814,94 @@ def file_controller(
         return f"File controller error ({action}): {e}"
 
 
+# ── Did it take effect? (core/verify.py) ─────────────────────────────────────
+#
+# The file calls above say what they did as soon as the call returns without
+# an exception. The check reads the disk afterwards: the file is there with
+# the contents written, the deleted one is gone, the moved one is at the
+# destination and not at the source. Cheap, so every changing action gets it
+# (bfrpaulondev/Mark-BP's file postconditions, without their SHA-256 of every
+# file up to 8 MB — a read-back of what was written says the same).
+
+_FILE_CHANGES = {"create_file", "create_folder", "delete", "move", "copy", "rename", "write"}
+
+
+def _where(params: dict, before: dict | None = None):
+    """(source, destination) as the handler resolves them."""
+    path, name = params.get("path", "desktop"), params.get("name", "")
+    base = _resolve_path(path)
+    src = (base / name) if name else base
+    action = str(params.get("action", "")).lower().strip()
+    dst = None
+    if action in ("move", "copy") and params.get("destination"):
+        dst = _resolve_path(params["destination"])
+        dst_is_dir = (before or {}).get("dst_is_dir", dst.is_dir())
+        if dst_is_dir:
+            dst = dst / src.name
+    elif action == "rename" and params.get("new_name"):
+        dst = src.parent / params["new_name"]
+    return src, dst
+
+
+def _snapshot(params: dict):
+    action = str((params or {}).get("action", "")).lower().strip()
+    if action not in _FILE_CHANGES:
+        return None
+    src, _ = _where(params)
+    before = {"src_existed": src.exists()}
+    if params.get("destination"):
+        before["dst_is_dir"] = _resolve_path(params["destination"]).is_dir()
+    return before
+
+
+def _verify(params: dict, result, before):
+    from core import verify as v
+    action = str((params or {}).get("action", "")).lower().strip()
+    if action not in _FILE_CHANGES or before is None:
+        return None
+    src, dst = _where(params, before)
+
+    if action in ("create_file", "write"):
+        content = str(params.get("content", ""))
+        if not src.is_file():
+            return v.failed(f"'{src.name}' is not there")
+        try:
+            text = src.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            return v.unverified(f"'{src.name}' exists but could not be read back ({e})")
+        ok = text.endswith(content) if params.get("append") else text == content
+        return (v.verified(f"'{src.name}' holds the new contents") if ok
+                else v.failed(f"'{src.name}' does not hold what was written"))
+    if action == "create_folder":
+        return (v.verified(f"the folder '{src.name}' exists") if src.is_dir()
+                else v.failed(f"there is no folder '{src.name}'"))
+    if action == "delete":
+        return (v.verified(f"'{src.name}' is gone from {src.parent.name}/") if not src.exists()
+                else v.failed(f"'{src.name}' is still in {src.parent.name}/"))
+    if dst is None:
+        return None
+    if action == "copy":
+        if dst.exists() and src.exists():
+            return v.verified(f"'{dst.name}' is in {dst.parent.name}/ and the original stayed")
+        return v.failed(f"there is no '{dst.name}' in {dst.parent.name}/")
+    # move, rename
+    if dst.exists() and not src.exists():
+        return v.verified(f"'{dst.name}' is in {dst.parent.name}/ and no longer at the old place")
+    if dst.exists():
+        return v.unverified(f"'{dst.name}' is there, but so is '{src.name}'")
+    return v.failed(f"there is no '{dst.name}' in {dst.parent.name}/")
+
+
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_controller",
-    "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
+    "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage. empty_trash empties the Recycle Bin (the user confirms on the HUD; it cannot be undone) — use it for 'empty / clear the recycle bin', never clicks; trash_info says how much is in it.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info"
+                "description": "list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info | empty_trash | trash_info"
             },
             "path": {
                 "type": "STRING",
@@ -766,4 +937,6 @@ TOOL = {
         ]
     },
     "handler": file_controller,
+    "snapshot": _snapshot,
+    "verify": _verify,
 }

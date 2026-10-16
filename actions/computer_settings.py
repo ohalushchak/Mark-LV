@@ -90,6 +90,59 @@ def volume_mute():
         subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
             capture_output=True)
 
+def _endpoint_volume():
+    """The default output's IAudioEndpointVolume. pycaw 2025+ wraps the
+    device and hands it over as `.EndpointVolume`; older versions return the
+    raw COM device, which is activated here. On the newer pycaw the old code
+    raised on every call — volume_get answered None and volume_set fell back
+    to pressing mute twice while reporting the volume as set."""
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    device = AudioUtilities.GetSpeakers()
+    ev = getattr(device, "EndpointVolume", None)
+    if ev is not None:
+        return ev
+    from ctypes import cast, POINTER
+    from comtypes import CLSCTX_ALL
+    interface = device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    return cast(interface, POINTER(IAudioEndpointVolume))
+
+
+def mute_get() -> bool | None:
+    """Whether the output is muted, or None where it cannot be read."""
+    try:
+        if _OS == "Windows":
+            return bool(_endpoint_volume().GetMute())
+        if _OS == "Darwin":
+            r = subprocess.run(["osascript", "-e", "output muted of (get volume settings)"],
+                               capture_output=True, text=True, timeout=5)
+            return r.stdout.strip() == "true"
+        r = subprocess.run(["pactl", "get-sink-mute", "@DEFAULT_SINK@"],
+                           capture_output=True, text=True, timeout=5)
+        return "yes" in r.stdout.lower() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def mute_set(on: bool) -> None:
+    """Mute or unmute — not toggle. "Mute" used to press the mute key, which
+    un-muted a machine that was already muted."""
+    try:
+        if _OS == "Windows":
+            _endpoint_volume().SetMute(1 if on else 0, None)
+            return
+        if _OS == "Darwin":
+            subprocess.run(["osascript", "-e",
+                            f"set volume {'with' if on else 'without'} output muted"],
+                           capture_output=True, timeout=5)
+            return
+        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1" if on else "0"],
+                       capture_output=True, timeout=5)
+    except Exception as e:
+        print(f"[Settings] mute_set failed, using the mute key: {e}")
+        if mute_get() is not on:
+            volume_mute()
+
+
 def volume_get() -> int | None:
     """Current master volume 0-100, or None if this platform will not say.
 
@@ -98,17 +151,9 @@ def volume_get() -> int | None:
     undoable — a wrong undo is worse than no undo."""
     try:
         if _OS == "Windows":
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            db        = vol.GetMasterVolumeLevel()
-            if db <= -65.0:
-                return 0
-            return max(0, min(100, round(10 ** (db / 20) * 100)))
+            # The scalar is the 0-100 the Windows volume slider shows; the old
+            # dB-to-percent formula read 40% on the slider as ~4%.
+            return max(0, min(100, round(_endpoint_volume().GetMasterVolumeLevelScalar() * 100)))
         if _OS == "Darwin":
             r = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"],
                                capture_output=True, text=True, timeout=5)
@@ -162,21 +207,11 @@ def brightness_set(value: int) -> None:
 def volume_set(value: int):
     value = max(0, min(100, int(value)))
     if _OS == "Windows":
-        try:
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            vol_db    = -65.25 if value == 0 else max(-65.25, 20 * math.log10(value / 100))
-            vol.SetMasterVolumeLevel(vol_db, None)
-            return
-        except Exception as e:
-            print(f"[Settings] pycaw failed, using keypress fallback: {e}")
-            pyautogui.press("volumemute")
-            pyautogui.press("volumemute")
+        # No keypress fallback: there is no key for "set to N%", and the old
+        # one (mute twice) changed nothing while the reply said it had. The
+        # error reaches the reply, and the verdict reads the volume back.
+        _endpoint_volume().SetMasterVolumeLevelScalar(value / 100.0, None)
+        return
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", f"set volume output volume {value}"],
             capture_output=True)
@@ -262,9 +297,25 @@ def full_screen():
     if _OS == "Darwin": pyautogui.hotkey("ctrl", "command", "f")
     else:               pyautogui.press("f11")
 
+def _show_foreground(cmd: int) -> bool:
+    """ShowWindow on the window in front; False if there is none. Win+Down
+    only restores a maximised window (seen live: "minimize" after "maximize"
+    left it on screen), so Windows gets the call that does what it says."""
+    import ctypes
+    u = ctypes.windll.user32
+    hwnd = u.GetForegroundWindow()
+    if not hwnd:
+        return False
+    u.ShowWindow(hwnd, cmd)
+    return True
+
+
 def minimize_window():
-    if _OS == "Darwin": pyautogui.hotkey("command", "m")
-    else:               pyautogui.hotkey("win", "down")
+    if _OS == "Darwin":    pyautogui.hotkey("command", "m")
+    elif _OS == "Windows":
+        if not _show_foreground(6):                  # SW_MINIMIZE
+            pyautogui.hotkey("win", "down")
+    else:                  pyautogui.hotkey("win", "down")
 
 def maximize_window():
     if _OS == "Darwin":
@@ -273,7 +324,8 @@ def maximize_window():
             'using {control down, command down}'],
             capture_output=True)
     elif _OS == "Windows":
-        pyautogui.hotkey("win", "up")
+        if not _show_foreground(3):                  # SW_MAXIMIZE
+            pyautogui.hotkey("win", "up")
     else:
         try:
             subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_vert,maximized_horz"],
@@ -601,8 +653,8 @@ def shutdown_computer():
 ACTION_MAP: dict[str, callable] = {
     "volume_up":           volume_up,
     "volume_down":         volume_down,
-    "mute":                volume_mute,
-    "unmute":              volume_mute,
+    "mute":                lambda: mute_set(True),
+    "unmute":              lambda: mute_set(False),
     "toggle_mute":         volume_mute,
     "brightness_up":       brightness_up,
     "brightness_down":     brightness_down,
@@ -858,15 +910,32 @@ def computer_settings(
         if not text:
             return "No text provided to type."
         enter_after = str(params.get("press_enter", "false")).lower() in ("true", "1", "yes")
-        type_text(text, press_enter_after=enter_after)
+        type_text(text, press_enter_after=False)
+        if enter_after:
+            from actions.computer_control import send_guard
+            held = send_guard(params, "enter", press_enter)
+            if held:
+                return f"Typed: {text[:80]}. {held}"
+            time.sleep(0.1)
+            press_enter()
         return f"Typed: {text[:80]}"
 
     if action == "press_key":
         key = str(value or params.get("key", "")).strip()
         if not key:
             return "No key specified."
+        from actions.computer_control import send_guard
+        held = send_guard(params, key, lambda: press_key(key))
+        if held:
+            return held
         press_key(key)
         return f"Pressed: {key}"
+
+    if action == "enter":
+        from actions.computer_control import send_guard
+        held = send_guard(params, "enter", press_enter)
+        if held:
+            return held
 
     if action in ("reload_n", "refresh_n", "reload_page_n"):
         try:
@@ -890,6 +959,21 @@ def computer_settings(
     func = ACTION_MAP.get(action)
     if not func:
         return _suggest(raw_action or description)
+
+    # ── The window the user named ────────────────────────────────────────────
+    # Window actions work on the window in front. Seen live: "minimise
+    # Outlook" minimised Claude, which was in front — and the check honestly
+    # reported "'Claude' is minimised". A named window is brought forward first.
+    target = _window_target(action, value)
+    if target:
+        if _OS != "Windows":
+            return f"I can only pick a window by name on Windows; {action} works on the one in front."
+        from actions.computer_control import _focus_window_win
+        msg = _focus_window_win(target)
+        if msg.startswith("Could not"):
+            return msg
+        if action == "switch_window":
+            return msg
 
     # ── Capture "before" so the change can be taken back ─────────────────────
     # Read-then-write is the whole mechanism for settings: there is no clever
@@ -923,6 +1007,260 @@ def computer_settings(
                   lambda: (dark_mode(), "Theme switched back.")[1])
 
     return f"Done: {action}."
+
+
+# ── Did it take effect? (core/verify.py) ─────────────────────────────────────
+#
+# Everything above ended in "Done: {action}." — including volume_set, whose
+# pycaw failure fell back to pressing mute twice, and "mute", which pressed the
+# mute key and so un-muted a muted machine. Each setting is now read back:
+# volume, mute, brightness and theme by value; window actions by the state of
+# the window that was in front; shortcuts by what changed on screen (the same
+# check as computer_control). A value the system will not report is
+# UNVERIFIED. (bfrpaulondev/Mark-BP's settings and window-state checks.)
+
+_VOLUME = {"volume_up", "volume_down", "volume_set", "mute", "unmute", "toggle_mute"}
+_BRIGHTNESS = {"brightness_up", "brightness_down"}
+_WINDOW = {"minimize", "maximize", "full_screen", "fullscreen", "snap_left", "snap_right",
+           "switch_window", "show_desktop", "close_window"}
+_OPENERS = {"task_manager", "file_explorer", "open_settings", "open_run", "screenshot"}
+_SCREEN = {"refresh_page", "reload", "reload_n", "refresh_n", "reload_page_n", "close_tab",
+           "new_tab", "next_tab", "prev_tab", "go_back", "go_forward", "zoom_in", "zoom_out",
+           "zoom_reset", "find_on_page", "scroll_up", "scroll_down", "scroll_top",
+           "scroll_bottom", "page_up", "page_down", "paste", "cut", "undo", "redo",
+           "select_all", "save", "enter", "escape", "pause_video", "play_pause",
+           "focus_search", "press_key"}
+
+
+def _resolved(params: dict) -> tuple[str, object]:
+    """The action and value computer_settings() will act on — the same
+    resolution as the top of the handler."""
+    params = params or {}
+    raw = str(params.get("action", "") or "").strip()
+    value = params.get("value", None)
+    if not raw and params.get("description"):
+        d = _detect_action(str(params.get("description")))
+        raw = d.get("action", "")
+        if value is None:
+            value = d.get("value")
+    return raw.lower().strip().replace(" ", "_").replace("-", "_"), value
+
+
+def theme_is_light() -> bool | None:
+    try:
+        if _OS == "Windows":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                return bool(winreg.QueryValueEx(k, "AppsUseLightTheme")[0])
+        if _OS == "Darwin":
+            r = subprocess.run(["osascript", "-e", 'tell app "System Events" to tell '
+                                'appearance preferences to get dark mode'],
+                               capture_output=True, text=True, timeout=5)
+            return r.stdout.strip() != "true"
+        r = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+                           capture_output=True, text=True, timeout=5)
+        return "dark" not in r.stdout
+    except Exception:
+        return None
+
+
+_TARGETABLE = {"minimize", "maximize", "full_screen", "fullscreen", "snap_left", "snap_right",
+               "switch_window"}
+
+
+def _window_target(action: str, value) -> str:
+    """The window name in `value` for a window action, or ""."""
+    if action not in _TARGETABLE or value is None:
+        return ""
+    v = str(value).strip()
+    return "" if not v or v.isdigit() else v
+
+
+def _snapshot(params: dict):
+    from core import desktop_state as ds
+    action, value = _resolved(params)
+    target = _window_target(action, value)
+    if target and _OS == "Windows":
+        from actions.computer_control import _find_window_win
+        w = _find_window_win(target)
+        return {"fg": ds.window(w.hwnd) if w else None, "target": target}
+    if action in _VOLUME:
+        return {"volume": volume_get(), "muted": mute_get()}
+    if action in _BRIGHTNESS:
+        return {"brightness": brightness_get()}
+    if action == "dark_mode":
+        return {"light": theme_is_light()}
+    if action in _WINDOW:
+        return {"fg": ds.foreground()}
+    if action in _OPENERS:
+        return {"fg": ds.foreground(), "windows": {w.hwnd for w in ds.windows()}}
+    if action == "copy":
+        try:
+            return {"clip": pyperclip.paste() if _PYPERCLIP else None}
+        except Exception:
+            return {"clip": None}
+    if action in ("type_text", "write_on_screen", "type", "write"):
+        return {"focus": ds.focused_control()}
+    if action in _SCREEN:
+        from actions.computer_control import _snapshot as cc_snapshot
+        return cc_snapshot({"action": "press"})
+    return None
+
+
+def _verify_volume(action, value, before):
+    from core import verify as v
+    b, bm = before.get("volume"), before.get("muted")
+    if action in ("mute", "unmute", "toggle_mute"):
+        def look():
+            m = mute_get()
+            if m is None:
+                return v.unverified("this system does not report whether it is muted")
+            want = {"mute": True, "unmute": False}.get(action, None if bm is None else not bm)
+            if want is None:
+                return v.unverified(f"the sound is now {'muted' if m else 'on'}")
+            if m == want:
+                return v.verified(f"the sound is {'muted' if m else 'on'}")
+            return v.failed(f"the sound is still {'muted' if m else 'on'}")
+        return v.poll(look)
+
+    def look():
+        a = volume_get()
+        if a is None or b is None:
+            return v.unverified("this system does not report its volume")
+        if action == "volume_set":
+            target = max(0, min(100, int(value if value is not None else 50)))
+            return (v.verified(f"the volume is {a}%") if abs(a - target) <= 2
+                    else v.failed(f"the volume is {a}%, not {target}%"))
+        up = action == "volume_up"
+        if (a > b) if up else (a < b):
+            return v.verified(f"the volume is {a}% (it was {b}%)")
+        if a == (100 if up else 0):
+            return v.verified(f"the volume is already at {a}%")
+        return v.failed(f"the volume stayed at {a}%")
+    return v.poll(look)
+
+
+def _verify_window(action, before):
+    from core import desktop_state as ds
+    from core import verify as v
+    if _OS != "Windows":
+        return v.unverified("I can only read window state on Windows")
+    fg0 = before.get("fg")
+    if not fg0:
+        return v.unverified("I could not tell which window was in front before")
+    name = f"'{fg0['title'][:50]}'"
+
+    def look():
+        w, fg = ds.window(fg0["hwnd"]), ds.foreground() or {}
+        if action == "switch_window" and before.get("target"):
+            return (v.verified(f"{name} is in front now") if fg.get("hwnd") == fg0["hwnd"]
+                    else v.failed(f"'{fg.get('title', '')[:50]}' is in front, not {name}"))
+        if action == "switch_window":
+            return (v.verified(f"'{fg.get('title', '')[:50]}' is in front now")
+                    if fg.get("hwnd") and fg["hwnd"] != fg0["hwnd"]
+                    else v.failed(f"{name} is still in front"))
+        if action == "close_window":
+            if w is None or not w["visible"]:
+                return v.verified(f"{name} closed")
+            if w["title"] != fg0["title"]:
+                return v.verified(f"the tab closed; the window now shows '{w['title'][:50]}'")
+            return v.unverified(f"{name} is still open with the same title")
+        if w is None:
+            return v.unverified(f"{name} is gone")
+        if action in ("minimize", "show_desktop"):
+            return (v.verified(f"{name} is minimised") if w["minimized"]
+                    else v.failed(f"{name} is still on screen"))
+        if action == "maximize":
+            return (v.verified(f"{name} is maximised") if w["maximized"]
+                    else v.failed(f"{name} is not maximised"))
+        if w["rect"] != fg0["rect"]:
+            return v.verified(f"{name} moved or resized")
+        if action in ("full_screen", "fullscreen"):
+            return v.unverified(f"{name} did not change size — the app may not have a full-screen mode")
+        return v.failed(f"{name} did not move")
+    return v.poll(look)
+
+
+def _verify(params: dict, result, before):
+    from core import desktop_state as ds
+    from core import verify as v
+    if before is None or str(result or "").startswith("[CONFIRMATION_PENDING]"):
+        return None
+    action, value = _resolved(params)
+
+    if action in _VOLUME:
+        return _verify_volume(action, value, before)
+
+    if action in _BRIGHTNESS:
+        b = before.get("brightness")
+
+        def look():
+            a = brightness_get()
+            if a is None or b is None:
+                return v.unverified("this display does not report its brightness")
+            up = action == "brightness_up"
+            if (a > b) if up else (a < b):
+                return v.verified(f"the brightness is {a}% (it was {b}%)")
+            if a == (100 if up else 0):
+                return v.verified(f"the brightness is already at {a}%")
+            return v.failed(f"the brightness stayed at {a}%")
+        return v.poll(look)
+
+    if action == "dark_mode":
+        b = before.get("light")
+
+        def look():
+            a = theme_is_light()
+            if a is None or b is None:
+                return v.unverified("I could not read the theme setting")
+            if a != b:
+                return v.verified(f"apps now use the {'light' if a else 'dark'} theme")
+            return v.failed(f"apps still use the {'light' if a else 'dark'} theme")
+        return v.poll(look)
+
+    if action in _WINDOW:
+        return _verify_window(action, before)
+
+    if action in _OPENERS:
+        if _OS != "Windows":
+            return v.unverified("I can only see new windows on Windows")
+
+        def look():
+            fg = ds.foreground() or {}
+            fg0 = before.get("fg") or {}
+            if fg.get("hwnd") and fg["hwnd"] != fg0.get("hwnd"):
+                return v.verified(f"'{fg['title'][:50] or fg['exe']}' opened in front")
+            new = [w for w in ds.windows() if w.hwnd not in before["windows"]]
+            if new:
+                return v.verified(f"'{new[0].title[:50]}' opened")
+            return v.unverified("no new window appeared in front")
+        return v.poll(look, timeout=3.0)
+
+    if action == "copy":
+        def look():
+            try:
+                now = pyperclip.paste() if _PYPERCLIP else None
+            except Exception:
+                now = None
+            if now is None:
+                return v.unverified("I could not read the clipboard")
+            if now != before.get("clip"):
+                return v.verified(f"the clipboard now holds {len(now)} characters")
+            return v.unverified("the clipboard did not change — maybe nothing was selected")
+        return v.poll(look)
+
+    if action in ("type_text", "write_on_screen", "type", "write"):
+        from actions.computer_control import _verify_typing
+        text = str(value or (params or {}).get("text", "")).strip()
+        return _verify_typing("type", {"text": text}, before)
+
+    if action in _SCREEN:
+        from actions.computer_control import _verify as cc_verify
+        key = "enter" if action == "enter" else str(value or (params or {}).get("key", ""))
+        return cc_verify({"action": "press", "key": key}, result, before)
+
+    return None
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
@@ -968,12 +1306,18 @@ TOOL = {
                     "Resolved locally — no extra model call."
                 )
             },
+            "confirmed": {
+                "type": "BOOLEAN",
+                "description": "Only on the follow-up call after a [CONFIRM_SEND] result, once the user has said yes."
+            },
             "value": {
                 "type": "STRING",
-                "description": "Optional value: volume level 0-100, text to type, key name, the app to close for close_app, etc."
+                "description": "Optional value: volume level 0-100, text to type, key name, the app to close for close_app, or for minimize / maximize / full_screen / snap_left / snap_right / switch_window the app or window to act on (e.g. 'Outlook') — without it they act on the window in front."
             }
         },
         "required": []
     },
     "handler": computer_settings,
+    "snapshot": _snapshot,
+    "verify": _verify,
 }
