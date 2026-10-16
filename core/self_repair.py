@@ -79,7 +79,7 @@ MAX_FAILED_TRIES = 2         # then the same task on the same code is refused
 # that same check.
 PROTECTED = {
     "core/confirm.py", "core/undo.py", "core/shell_policy.py", "core/action_loader.py",
-    "core/plugin_loader.py", "core/tool_args.py", "core/health.py", "core/capabilities.py",
+    "core/plugin_loader.py", "core/tool_args.py", "core/health.py", "core/verify.py", "core/send_gate.py", "core/computer_use.py", "core/capabilities.py",
     "core/self_repair.py", "core/restart_helper.py", "core/agents.py", "core/activity.py",
     "core/prompt.txt", "actions/self_improve.py", "actions/self_check.py",
     "memory/config_manager.py", "agents.md", "claude.md", ".gitignore",

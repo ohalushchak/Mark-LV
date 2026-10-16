@@ -1,3 +1,4 @@
+import re
 import time
 import subprocess
 import platform
@@ -67,6 +68,10 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
 
 def _normalize(raw: str) -> str:
     key = raw.lower().strip()
+    if re.match(r"^[a-z][a-z0-9+.-]*:\S", key):
+        # A URI ("ms-settings:nightlight") goes as it is: the substring match
+        # below turned it into plain "ms-settings:" and lost the page.
+        return raw.strip()
 
     if key in _APP_ALIASES:
         return _APP_ALIASES[key].get(_SYSTEM, raw)
@@ -105,7 +110,10 @@ def _launch_windows(app_name: str) -> bool:
         pyautogui.PAUSE = 0.1
         pyautogui.press("win")
         time.sleep(0.7)
-        pyautogui.write(app_name, interval=0.05)
+        # Pasted, not typed: typed US-layout keys under a Ukrainian layout
+        # turn "WhatsApp" into "ЦрфеіФзз".
+        from actions.computer_control import _paste_text
+        _paste_text(app_name)
         time.sleep(0.9)
         pyautogui.press("enter")
         time.sleep(2.5)
@@ -231,6 +239,25 @@ def _launch_linux(app_name: str) -> bool:
     return False
 
 
+def _to_front(app_name: str) -> None:
+    """Launching an app that already runs often does nothing visible: seen
+    live, Claude stayed minimised and the check said so. When a window of it
+    exists but none is in front, bring the best one forward (restoring it)."""
+    if _SYSTEM != "Windows":
+        return
+    try:
+        from actions._app_closer import match_windows
+        from actions.computer_control import _focus_window_win
+        from core import desktop_state as ds
+        wins = [w for w in ds.windows() if not ds.is_me(w.pid)]
+        mine = match_windows(wins, app_name)
+        fg = (ds.foreground() or {}).get("hwnd")
+        if mine and fg not in {w.hwnd for w in mine}:
+            _focus_window_win(app_name)
+    except Exception as e:
+        print(f"[open_app] could not bring {app_name} to the front: {e}")
+
+
 _OS_LAUNCHERS = {
     "Windows": _launch_windows,
     "Darwin":  _launch_macos,
@@ -260,9 +287,11 @@ def open_app(
 
     try:
         if launcher(normalized):
+            _to_front(app_name)
             return f"Opened {app_name}."
         if normalized.lower() != app_name.lower():
             if launcher(app_name):
+                _to_front(app_name)
                 return f"Opened {app_name}."
         return (
             f"Could not confirm that {app_name} launched. "
@@ -271,6 +300,93 @@ def open_app(
     except Exception as e:
         print(f"[open_app] Error: {e}")
         return f"Failed to open {app_name}: {e}"
+
+
+# ── Did it open? (core/verify.py) ────────────────────────────────────────────
+#
+# Every launcher above returns True after a sleep — Popen, "start uri", or
+# typing the name into the Start Menu — so "Opened X." was said for apps that
+# never started (and, through the Start Menu, for a web search in Edge). The
+# check compares the windows and processes before and after: a new window of
+# that app, or that app's window coming to the front, is VERIFIED; a new
+# process with no window yet, or a new window of some other app, is
+# UNVERIFIED with what was seen; nothing new at all is FAILED.
+# (bfrpaulondev/Mark-BP's launch postcondition; syamsulmuiin/Mark's psutil
+# check for macOS and Linux.)
+
+_OPEN_TIMEOUT_S = 6.0     # a cold Office or Steam start can take this long
+
+
+def _snapshot(params: dict):
+    from core import desktop_state as ds
+    return {"windows": {w.hwnd for w in ds.windows()},
+            "fg": (ds.foreground() or {}).get("hwnd"),
+            "pids": set(ds.processes())}
+
+
+def _proc_words(app_name: str) -> list[str]:
+    names = {app_name, _normalize(app_name)}
+    words = set()
+    for n in names:
+        n = n.lower().removesuffix(".exe").removesuffix(".app")
+        # Whole names only: the word "task" alone matched taskhostw.exe,
+        # which Windows starts all the time.
+        words.add(n.split(" --")[0].replace(" ", ""))
+    return [w for w in words if len(w) >= 3]
+
+
+def _verify(params: dict, result, before):
+    from core import desktop_state as ds
+    from core import verify as v
+    app = str((params or {}).get("app_name", "")).strip()
+    if app.lower().startswith("ms-settings:"):
+        app = "settings"                     # a Settings page opens the Settings app
+    if not app or not before:
+        return None
+    words = _proc_words(app)
+
+    def new_processes():
+        now = ds.processes()
+        return [n for pid, n in now.items()
+                if pid not in before["pids"] and any(w in n.replace(" ", "") for w in words)]
+
+    def look_windows():
+        from actions._app_closer import match_windows
+        wins = [w for w in ds.windows() if not ds.is_me(w.pid)]
+        mine = {w.hwnd: w for w in match_windows(wins, app)}
+        new = [w for w in wins if w.hwnd not in before["windows"]]
+        fg = ds.foreground() or {}
+        for w in new:
+            if w.hwnd in mine:
+                return v.verified(f"a new {app} window is open: '{w.title[:60]}'")
+        if fg.get("hwnd") in mine:
+            if fg.get("hwnd") != before["fg"]:
+                return v.verified(f"{app} is in front: '{fg['title'][:60]}'")
+            return v.verified(f"{app} was already open and is in front")
+        procs = new_processes()
+        if procs and new:
+            # Store apps draw in an ApplicationFrameHost window titled in the
+            # system language ("Калькулятор"), so neither name matches.
+            return v.verified(f"{app} started and a new window '{new[0].title[:60]}' opened")
+        if procs:
+            return v.unverified(f"a {app} process started, but no window of it has appeared yet")
+        if new:
+            return v.unverified(f"a new window '{new[0].title[:60]}' appeared, "
+                                f"but I cannot tell it is {app}")
+        if mine:
+            return v.unverified(f"{app} is open, but no new window appeared and it is not in front")
+        return v.failed(f"no new window or process of {app} appeared")
+
+    def look_processes():
+        if new_processes():
+            return v.verified(f"a new {app} process is running")
+        running = set(ds.processes().values())
+        if any(w in n.replace(" ", "") for n in running for w in words):
+            return v.unverified(f"{app} was already running; no new process started")
+        return v.unverified(f"I could not see a {app} process — it may run under another name")
+
+    return v.poll(look_windows if _SYSTEM == "Windows" else look_processes,
+                  timeout=_OPEN_TIMEOUT_S, interval=0.3)
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
@@ -290,4 +406,6 @@ TOOL = {
         ]
     },
     "handler": open_app,
+    "snapshot": _snapshot,
+    "verify": _verify,
 }

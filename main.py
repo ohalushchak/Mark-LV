@@ -422,13 +422,16 @@ TOOL_DECLARATIONS = [
             "look at camera, analyze my screen, etc. "
             "You have NO visual ability without this tool. "
             "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
-            "When using camera: the live view stays open until user says close it or calls close_camera."
+            "When using camera: the live view stays open until user says close it or calls close_camera. "
+            "With several monitors it shows the one under the mouse; when the user means another "
+            "('the other monitor', 'the left screen', 'monitor 2'), pass `monitor`."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "angle": {"type": "STRING", "description": "'screen' to capture display, 'camera' for webcam. Default: 'screen'"},
-                "text":  {"type": "STRING", "description": "The question or instruction about the captured image"}
+                "text":  {"type": "STRING", "description": "The question or instruction about the captured image"},
+                "monitor": {"type": "STRING", "description": "Which screen: 'cursor' (default), 'primary', 'left', 'right', or a number counted from the left"}
             },
             "required": ["text"]
         }
@@ -1785,7 +1788,9 @@ class JarvisLive:
                         print(f"[Vision] 📷 Camera: {len(img_b):,} bytes")
                         _stall = "camera"
                     else:
-                        img_b, mime_t = await loop.run_in_executor(None, _capture_screen)
+                        _mon = str(args.get("monitor") or "")
+                        img_b, mime_t = await loop.run_in_executor(
+                            None, lambda: _capture_screen(_mon))
                         print(f"[Vision] 🖥️  Screen: {len(img_b):,} bytes")
                         _stall = "screen"
                     self._pending_vision = (img_b, mime_t, user_text, angle)

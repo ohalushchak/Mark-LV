@@ -139,21 +139,68 @@ def _pick_monitor(monitors: list[dict],
     return 1, "first listed"
 
 
-def _capture_screen() -> tuple[bytes, str]:
+def _choose_monitor(monitors: list[dict], which: str | int | None,
+                    cursor: tuple[int, int] | None) -> tuple[int, str]:
+    """`which` as the user says it: "" / "cursor" (the default, see
+    _pick_monitor), "primary", "left" / "right", or a number counted from the
+    left — the way a person numbers the screens on their desk, not the OS's
+    enumeration order."""
+    if isinstance(which, tuple) and len(which) == 2:
+        return _pick_monitor(monitors, (int(which[0]), int(which[1])))   # the screen with this point
+    w = str(which or "").strip().lower()
+    real = list(enumerate(monitors))[1:]
+    if not w or w in ("cursor", "current", "this", "mouse") or len(real) <= 1:
+        return _pick_monitor(monitors, cursor)
+    by_x = sorted(real, key=lambda im: (im[1]["left"], im[1]["top"]))
+    if w == "primary":
+        for i, m in real:
+            if m.get("is_primary") or (m["left"] == 0 and m["top"] == 0):
+                return i, "primary"
+    if w in ("left", "leftmost"):
+        return by_x[0][0], "leftmost"
+    if w in ("right", "rightmost"):
+        return by_x[-1][0], "rightmost"
+    if w.isdigit() and 1 <= int(w) <= len(by_x):
+        return by_x[int(w) - 1][0], f"number {w} from the left"
+    return _pick_monitor(monitors, cursor)
 
+
+def describe_monitor(monitors: list[dict], idx: int) -> str:
+    """'monitor 2 of 3 (3440×1440, primary)' — numbered from the left."""
+    real = list(enumerate(monitors))[1:]
+    by_x = [i for i, _ in sorted(real, key=lambda im: (im[1]["left"], im[1]["top"]))]
+    m = monitors[idx]
+    n = by_x.index(idx) + 1 if idx in by_x else 1
+    prim = ", primary" if m.get("is_primary") or (m["left"] == 0 and m["top"] == 0) else ""
+    return f"monitor {n} of {max(1, len(real))} ({m['width']}×{m['height']}{prim})"
+
+
+def capture_monitor(which: str | int | None = None):
+    """One screen at full resolution, and where it sits on the desktop.
+
+    Returns (png bytes, geometry) with geometry = {left, top, width, height,
+    label}: the screen's rectangle in the coordinates the mouse uses, so a
+    point found in the image maps back to a click (computer_control's
+    screen_click). `_capture_screen` threw that away and kept only the image."""
     if not _MSS:
         raise RuntimeError("mss is not installed. Run: pip install mss")
-
     factory = getattr(mss, "MSS", None) or mss.mss   # mss.mss is deprecated in 10.x
     with factory() as sct:
         monitors = sct.monitors          # [0] = all combined, [1..n] = real screens
-        idx, why = _pick_monitor(monitors, _cursor_pos())
-        target   = monitors[idx]
-        shot     = sct.grab(target)
-        png      = mss.tools.to_png(shot.rgb, shot.size)
-    print(f"[Vision] 🖥️  Monitor {idx} of {len(monitors) - 1}: "
-          f"{target['width']}×{target['height']} ({why})")
+        idx, why = _choose_monitor(monitors, which, _cursor_pos())
+        target = monitors[idx]
+        shot = sct.grab(target)
+        png = mss.tools.to_png(shot.rgb, shot.size)
+        label = describe_monitor(monitors, idx)
+    print(f"[Vision] 🖥️  {label} ({why})")
+    geom = {"left": int(target["left"]), "top": int(target["top"]),
+            "width": int(target["width"]), "height": int(target["height"]),
+            "image_size": tuple(shot.size), "label": label}
+    return png, geom
 
+
+def _capture_screen(which: str | int | None = None) -> tuple[bytes, str]:
+    png, _geom = capture_monitor(which)
     return _compress(png, "PNG")
 
 

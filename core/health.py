@@ -248,8 +248,11 @@ def get(err_id: str) -> dict | None:
 
 # ── per-tool status ─────────────────────────────────────────────────────────
 
+# How handlers in this codebase word a failure when they return instead of
+# raising: "computer_control 'click' failed: …", "Could not…", "Unknown action".
 _FAILED_RE = re.compile(
-    r"^\s*(\[?error\]?[:\s]|failed\b|tool '[^']+' failed|sir, the '[^']+' plugin failed)",
+    r"^\s*(\[?error\]?[:\s]|failed\b|tool '[^']+' failed|sir, the '[^']+' plugin failed"
+    r"|\w+ '[^']+' failed\b|could not\b|couldn't\b|unknown action\b)",
     re.IGNORECASE)
 
 

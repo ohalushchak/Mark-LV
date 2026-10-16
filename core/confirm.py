@@ -151,6 +151,21 @@ def resolve(accepted: bool) -> None:
                      name=f"confirm-{p.key}").start()
 
 
+def dismiss(key: str) -> None:
+    """Take the banner down without running anything, when what it asked is
+    settled another way (core/send_gate.py: the user said yes by voice)."""
+    global _pending
+    with _lock:
+        if _pending is None or _pending.key != key:
+            return
+        _pending = None
+    if _hide_cb:
+        try:
+            _hide_cb()
+        except Exception:
+            pass
+
+
 def pending_title() -> str:
     """'' when nothing is waiting. Lets an action avoid stacking two banners."""
     with _lock:

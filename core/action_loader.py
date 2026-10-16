@@ -24,6 +24,11 @@ zero-argument callable returning ``(ok, detail)`` that checks the tool can work
 without doing anything the user would notice (a binary is on PATH, a module
 imports, a harmless call answers). ``self_check`` runs them.
 
+``snapshot`` / ``verify`` — how to see whether the call took effect: the state
+before, and a ``Verdict`` after (contract in core/verify.py). The verdict is
+appended to the result as [VERIFIED] / [UNVERIFIED] / [FAILED]; a FAILED one
+also counts as a failed call in health.
+
 Every call's outcome goes to core/health.py: an escaped exception, a handler
 that called ``health.failed(why)``, or a result that reads like a failure.
 
@@ -42,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from core import health
+from core import health, verify
 
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
@@ -82,6 +87,8 @@ class ActionRecord:
     behavior: Optional[str] = None     # None = the API's default (blocking)
     scheduling: Optional[str] = None   # None = the API's default (WHEN_IDLE)
     probe: Optional[Callable] = None   # () -> (ok, detail); see the module docstring
+    snapshot: Optional[Callable] = None   # (parameters) -> before
+    verify: Optional[Callable] = None     # (parameters, result, before) -> Verdict | None
 
 
 class ActionRegistry:
@@ -125,6 +132,7 @@ class ActionRegistry:
         rec = self._actions.get(name)
         if rec is None or not rec.valid:
             return f"Action '{name}' is not available."
+        before = verify.snapshot(rec.snapshot, parameters)
         health.begin_call()
         try:
             result = _call_handler(rec.handler, parameters, ctx or {})
@@ -135,8 +143,19 @@ class ActionRegistry:
             health.record(name, False, "crash", f"{type(e).__name__}: {e}", exc=e,
                           args=parameters)
             return f"Tool '{name}' failed: {e}"
-        health.record_result(name, result, args=parameters)
-        return result or NO_RESULT
+        why = health.end_call()
+        if why or health.looks_failed(result):
+            # Already a failure in its own words: nothing to verify.
+            health.record(name, False, "reported", why or str(result), args=parameters)
+            return result or NO_RESULT
+        verdict = verify.check(rec.verify, parameters, result, before)
+        if verdict is not None:
+            print(f"[Verify] {name}: {verdict.state} — {verdict.detail}")
+        if verdict is not None and verdict.state == verify.FAILED:
+            health.record(name, False, "no_effect", verdict.detail, args=parameters)
+        else:
+            health.record(name, True)
+        return verify.tag(result or NO_RESULT, verdict)
 
 
 def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:
@@ -183,7 +202,9 @@ def _validate(module, filename: str) -> ActionRecord:
                         handler=handler, file=filename, valid=True, error="",
                         behavior=_opt_upper(tool.get("behavior"), _BEHAVIORS),
                         scheduling=_opt_upper(tool.get("scheduling"), _SCHEDULING),
-                        probe=tool.get("probe") if callable(tool.get("probe")) else None)
+                        probe=tool.get("probe") if callable(tool.get("probe")) else None,
+                        snapshot=tool.get("snapshot") if callable(tool.get("snapshot")) else None,
+                        verify=tool.get("verify") if callable(tool.get("verify")) else None)
 
 
 def discover_actions(actions_dir: Path, reserved_names: set[str] | None = None,

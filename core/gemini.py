@@ -82,6 +82,7 @@ _KEY_FILE = _BASE / "config" / "api_keys.json"
 FAST = "fast"      # short classification, extraction, one-line decisions
 SMART = "smart"    # reasoning, generation, long documents, images
 SEARCH = "search"  # grounded search — REST only, see below
+VISION = "vision"  # pointing at things in a screenshot — REST first, see below
 
 # A rung that means "ask the Live model instead", through a short throwaway
 # session rather than the REST text API.
@@ -143,6 +144,17 @@ _LADDERS = {
     # returning an answer with no sources behind it.
     SEARCH: ("gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite",
              "gemini-flash-latest"),
+    # Finding an element on a screenshot (computer_control's screen_click)
+    # needs exact numbers back. Through Live they arrive as a transcription of
+    # speech, where "712, 430" can come back as words and fail to parse; the
+    # REST models also return Gemini's trained 0-1000 boxes reliably. Live
+    # stays last, as the quota fallback.
+    # Order measured on a 3440×1440 screen, finding the Start button:
+    # 3.6-flash 3.3 s (close), flash-latest 5.8 s (exact), 3.5-flash 9.7 s
+    # (the wrong icon); turning thinking off made every one of them guess the
+    # left-aligned taskbar of their training data instead of looking.
+    VISION: ("gemini-3.6-flash", "gemini-flash-latest", "gemini-3.5-flash",
+             "gemini-2.5-flash", "gemini-3.5-flash-lite", LIVE),
 }
 
 # The conversation's own model, and ONE careful fallback behind it.

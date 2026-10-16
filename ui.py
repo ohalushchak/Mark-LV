@@ -505,7 +505,7 @@ _metrics = _SysMetrics()
 # The coding agents' own colours on the HUD: fixed, and away from the hues the
 # assistant's states use (green listening, amber thinking, cyan idle), so "an
 # agent is working" never reads as one of them.
-AGENT_COLOURS = {"claude": "#E8825B", "codex": "#9B86FF"}
+AGENT_COLOURS = {"claude": "#E8825B", "codex": "#9B86FF", "computer": "#F06FB0"}
 AGENT_FLASH_S = 4.0       # how long the done / stopped ring stays after a job
 
 
@@ -820,15 +820,20 @@ class HudCanvas(QWidget):
         the jobs. A self-repair counts from its first test run to its last,
         because the user is waiting through those too."""
         try:
-            from core import agents, self_repair
+            from core import agents, computer_use, self_repair
             j = agents.job()
             sr = self_repair.state()
+            cu = computer_use.state()
         except Exception:
             return
         running = j is not None and not j.done
         phase = sr.get("state")
         now = time.time()
-        if phase in ("preparing", "agent", "testing"):
+        if cu.get("state") in ("running", "waiting"):
+            # Computer use moves the mouse: the ring says who is doing it.
+            engine, kind = "computer", "computer"
+            label = "COMPUTER USE · " + str(cu.get("phase") or "working").upper()
+        elif phase in ("preparing", "agent", "testing"):
             engine = j.engine if running else agents.current()["engine"]
             label = "SELF-REPAIR · " + str(sr.get("step") or phase).upper()
             kind = "repair"
@@ -841,10 +846,13 @@ class HudCanvas(QWidget):
         if label is None:
             if prev is not None:
                 # Just finished: a short ring in green or red says how.
-                ok = (sr.get("state") in ("review", "applied") if prev["kind"] == "repair"
-                      else bool(j is not None and j.ok))
-                name = ("SELF-REPAIR" if prev["kind"] == "repair"
-                        else agents.LABEL.get(prev["engine"], prev["engine"]).upper())
+                if prev["kind"] == "computer":
+                    ok, name = cu.get("state") == "done", "COMPUTER USE"
+                else:
+                    ok = (sr.get("state") in ("review", "applied") if prev["kind"] == "repair"
+                          else bool(j is not None and j.ok))
+                    name = ("SELF-REPAIR" if prev["kind"] == "repair"
+                            else agents.LABEL.get(prev["engine"], prev["engine"]).upper())
                 self._agent_flash = (now + AGENT_FLASH_S, C.GREEN if ok else C.RED,
                                      f"✓  {name} DONE" if ok else f"✗  {name} STOPPED")
             self._agent = None

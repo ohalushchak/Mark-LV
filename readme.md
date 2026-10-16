@@ -57,6 +57,9 @@ It's not just an assistant — it's an extension of your digital life.
 | 💻 Coding by Voice | Open a project by name ("open project Mark LIV"), search and read its files, make exact edits you can undo, run commands and tests, and use git — status, diffs, commits and branches you can undo, push and draft pull requests behind CONFIRM. Commands that only read run at once, ones that change things wait for CONFIRM, destructive ones are refused; a long build keeps running and is announced when it ends |
 | 🤖 Coding Agents | Hand a large job to **Claude Code** or **Codex**: JARVIS asks first, the agent works in the background on your own plan, and the outcome is spoken when it is done. While it works, a ring in the agent's colour (coral for Claude Code, violet for Codex) turns around the hologram with what it is doing and for how long, and flashes green or red when it ends. The AGENT panel switches the agent, its model and effort, and shows the 5-hour and weekly usage limits |
 | 🩺 Self-Check | "What's broken?" — every tool failure is written to an error journal (keys and your paths hidden) and each tool shows green, yellow or red in the SELF-REPAIR panel. "Check yourself" probes every tool, the packages, git, disk, key and audio devices, and can run the test suite. A malformed tool call is refused with what to correct instead of half-running, and a tool that returns nothing is no longer reported as "Done." |
+| ✅ Checked Actions | Clicks, typing, opened apps, settings, files and web pages are read back afterwards: JARVIS says "done" only when it saw it happen, and says plainly when it could not tell — or when it did not work. Text arrives the same in any keyboard layout, and "click the Send button" finds it by name or by sight on the right monitor |
+| 🖱️ Computer Use | "Turn on night light", "show the cleanup recommendations": for jobs no direct skill covers, JARVIS looks at the screen, clicks controls by their real names or by sight, checks every step and confirms the goal with a last look — in the background, with a pink ring on the hologram. Moving the mouse stops it; deleting, paying, sending or signing out waits for your yes |
+| ✉️ Draft, Then Send | "Write Jane: hi, how are you?" opens the conversation in Slack (or another messenger) and leaves the text in the box for you to read and change. "Send it" asks first and sends only after your yes — by voice or on the HUD — and checks the box emptied |
 | 🛠️ Self-Repair | "Fix that error" or "improve yourself so that…": after you agree, Claude Code or Codex changes JARVIS's own code in a separate copy, the tests run before and after, and the change is refused if it touches a protected file (the safety gates, the tests, config) or breaks a test. You see the diff on the HUD and press APPLY or DISCARD — the assistant cannot apply it. An applied change is one commit you can undo; JARVIS restarts to load it and rolls it back by itself if it then fails to start |
 | 🔔 Agent Sessions | Optional: your own Claude Code and Codex sessions are announced when a long turn ends or when they are waiting for your permission (a hook, switched on in CONTROLS) |
 | 💬 Ask ChatGPT / Claude | "Ask ChatGPT …" copies the question and opens the app for you to send — it says plainly that it cannot read the answer back |
@@ -332,13 +335,14 @@ Mark LV/
 │   ├── proactive.py          # Proactive 2.0 — time/context/rotation-aware check-ins
 │   ├── reminder.py           # OS-native scheduled notifications
 │   ├── system_monitor.py     # CPU / RAM / GPU / temperature telemetry
-│   ├── computer_settings.py  # Volume, brightness, WiFi, power (per-OS)
-│   ├── computer_control.py   # Keyboard shortcuts, mouse, window management
+│   ├── computer_settings.py  # Volume, brightness, WiFi, power, windows (per-OS) — each read back
+│   ├── computer_control.py   # Mouse, keyboard, focus, find-and-click on screen — each action checked
+│   ├── computer_use.py       # Multi-step tasks on the screen — start, status, continue, stop
 │   ├── open_app.py           # Application launcher (per-OS name map)
 │   ├── browser_control.py    # Web browser control
-│   ├── file_controller.py    # File system operations
+│   ├── file_controller.py    # File system operations, read back; empty the Recycle Bin behind CONFIRM
 │   ├── file_processor.py     # Document reading and summarization
-│   ├── send_message.py       # Messaging integration
+│   ├── send_message.py       # Open a conversation, draft a message, send it after the user's yes
 │   ├── weather_report.py     # Live weather data
 │   ├── video_player.py       # Plays video on the HUD, where the avatar normally is
 │   ├── code_helper.py        # A single new script from a description; explain, run, screenshot-debug
@@ -377,6 +381,10 @@ Mark LV/
 │   ├── agent_relay.py        # Announces your own agent sessions; installs the hook into both CLIs
 │   ├── agent_hook.py         # The hook Claude Code and Codex run — drops events into ~/.jarvis/agent_queue
 │   ├── tool_args.py          # Checks each tool call against its schema before it runs
+│   ├── verify.py             # The verdict an action's result carries: VERIFIED / UNVERIFIED / FAILED
+│   ├── desktop_state.py      # What the desktop looks like now — windows, focus, UIA controls, screen samples
+│   ├── send_gate.py          # Nothing is sent from your accounts until you say so
+│   ├── computer_use.py       # The computer-use loop — look, plan, act through checked actions, final look
 │   ├── health.py             # Error journal (redacted) and per-tool green / yellow / red
 │   ├── capabilities.py       # Probes of tools, packages and devices; the test-suite runner
 │   ├── self_repair.py        # Self-repair loop — worktree, tests before/after, change check, review, apply
@@ -415,7 +423,7 @@ Everything stays on your machine. There is no MARK server, no telemetry and no a
 
 All three are listed in `.gitignore`, so a fork or a pull request cannot leak them by accident. **If you have already committed `config/api_keys.json` anywhere public, revoke that key** at [aistudio.google.com](https://aistudio.google.com/app/apikey) and generate a new one — removing the file in a later commit does not remove it from the history.
 
-Your voice is streamed to Google's Gemini Live API while a session is open, and it stops when you mute or close the app. The coding tools add two more: file contents and command output they read go to Gemini as tool results (files with keys — `api_keys.json`, `.env`, private keys — are never read), and a job you hand to Claude Code or Codex is sent by that CLI to Anthropic or OpenAI under your own account. The agent-session hook writes its events to `~/.jarvis/agent_queue` on your machine only. A copy of the console log (`~/.jarvis/logs/`), the error journal (`~/.jarvis/health/`) and self-repair's working copies and history (`~/.jarvis/self_repair/`) stay on your machine too; the journal hides keys, tokens, e-mail addresses and your home folder, and an error is sent to Claude Code or Codex only when you agree to a fix.
+Your voice is streamed to Google's Gemini Live API while a session is open, and it stops when you mute or close the app. The coding tools add two more: file contents and command output they read go to Gemini as tool results (files with keys — `api_keys.json`, `.env`, private keys — are never read), and a job you hand to Claude Code or Codex is sent by that CLI to Anthropic or OpenAI under your own account. The agent-session hook writes its events to `~/.jarvis/agent_queue` on your machine only. Finding something on screen by sight and computer use send screenshots of the window or monitor they work on to Gemini. A copy of the console log (`~/.jarvis/logs/`), the error journal (`~/.jarvis/health/`) and self-repair's working copies and history (`~/.jarvis/self_repair/`) stay on your machine too; the journal hides keys, tokens, e-mail addresses and your home folder, and an error is sent to Claude Code or Codex only when you agree to a fix.
 
 ---
 

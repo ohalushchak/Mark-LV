@@ -1,8 +1,34 @@
-import json
-import subprocess
-import sys
+"""
+Writing to someone in a messenger — as a draft first, sent only when asked.
+
+How the user wants it (2026-10-16): "Write Jane: hi, how are you?" opens the
+conversation and types the text into its message box AND LEAVES IT THERE, so
+it can be read and changed in the app. "Send it" sends what is in the box now
+— after asking, answered by voice or on the HUD (core/send_gate.py).
+
+What it replaced: a blind sequence per app — press Win, type the app's name,
+Ctrl+F, type the contact, Enter, paste, Enter — that read nothing back and
+answered "Message sent" every time. In Slack, Ctrl+F searches the open
+channel, not people, so the text landed wherever the focus happened to be.
+
+Now, on Windows:
+  open   — focus (or start) the app, use its jump-to box (Slack and Discord:
+           Ctrl+K), paste the name, Enter, and CHECK the conversation that
+           opened is that person's: the window title or the message box names
+           them ("Message to Jane Doe").
+  draft  — open, then paste the text into the focused message box and read it
+           back. Nothing is typed when the conversation could not be confirmed.
+  send   — back to the window of the last draft; what is in the box NOW is
+           what is asked about, and on the user's yes Enter is pressed and the
+           box must come back empty.
+
+Text goes in through the clipboard (computer_control._paste_text), so it does
+not depend on the keyboard layout.
+"""
+import platform as _platform
+import re
+import threading
 import time
-from pathlib import Path
 
 try:
     import pyautogui
@@ -12,337 +38,328 @@ try:
 except ImportError:
     _PYAUTOGUI = False
 
-try:
-    import pyperclip
-    _PYPERCLIP = True
-except ImportError:
-    _PYPERCLIP = False
+_OS = _platform.system()
 
-def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+# Process names (without .exe) of the desktop messengers.
+_APPS = {
+    "slack": "slack", "discord": "discord", "telegram": "telegram", "teams": "ms-teams",
+    "whatsapp": "whatsapp", "signal": "signal", "viber": "viber", "skype": "skype",
+}
+# The shortcut that opens each app's "jump to a conversation" box. Ctrl+F in
+# Slack searches messages in the open channel — the old code used it.
+_JUMP = {"slack": ("ctrl", "k"), "discord": ("ctrl", "k")}
+_JUMP_DEFAULT = ("ctrl", "f")
 
-def _get_os() -> str:
-    try:
-        cfg = json.loads(
-            (_base_dir() / "config" / "api_keys.json").read_text(encoding="utf-8")
-        )
-        return cfg.get("os_system", "windows").lower()
-    except Exception:
-        return "windows"
+_tl = threading.local()          # the handler's verdict, for _verify on this thread
+_last_draft: dict | None = None  # {"hwnd", "app", "receiver", "field"}
 
 
-def _require_pyautogui():
-    if not _PYAUTOGUI:
-        raise RuntimeError("PyAutoGUI not installed. Run: pip install pyautogui")
+def _app_key(platform: str) -> str:
+    p = (platform or "").strip().lower()
+    for k in _APPS:
+        if k in p:
+            return k
+    return p.replace(" ", "")
 
 
-def _paste_text(text: str) -> None:
-    _require_pyautogui()
+def _norm(t: str) -> str:
+    """Text as compared with a read-back: whitespace folded, case folded, and
+    emoji left out — Slack keeps 😊 as ":blush:" in its message box, so a
+    draft with emoji never matched and was reported as unreadable."""
+    import unicodedata
+    t = re.sub(r":[a-z0-9_+\-]+:", " ", str(t or ""))
+    t = "".join(" " if unicodedata.category(ch) in ("So", "Sk", "Cs") or ch == "\ufe0f" else ch
+                for ch in t)
+    return " ".join(t.split()).casefold()
 
-    os_name = _get_os()
-    paste_hotkey = ("command", "v") if os_name == "mac" else ("ctrl", "v")
 
-    if _PYPERCLIP:
-        pyperclip.copy(text)
-        time.sleep(0.15)
-        pyautogui.hotkey(*paste_hotkey)
-        time.sleep(0.1)
+def _bare(name: str) -> str:
+    """'#social' → 'social', '@Jane' → 'Jane': Slack names channels and
+    people without the sign in titles and lists."""
+    return str(name or "").strip().lstrip("#@").strip()
+
+
+def _names_receiver(receiver: str) -> bool:
+    """Does the window in front show that person's conversation?"""
+    from core import desktop_state as ds
+    words = _norm(_bare(receiver)).split()
+    if not words:
+        return False
+    fg = ds.foreground() or {}
+    f = ds.focused_control()
+    # A focused MESSAGE BOX names the conversation exactly ("Message to Jane
+    # Doe") and wins: Slack's window title lags a second behind, and
+    # an old "Jane Doe (DM)" title passed while #social was open. Any
+    # other focused control was too loose (a search result named like them).
+    if f is not None and f.control_type in ("Edit", "Document") and (f.name or "").strip():
+        text = f.name
     else:
-        pyautogui.write(text, interval=0.03)
+        text = fg.get("title", "")
+    t = _norm(text)
+    return all(w in t for w in words)
 
 
-def _clear_and_paste(text: str) -> None:
-    _require_pyautogui()
-    os_name = _get_os()
-    select_all = ("command", "a") if os_name == "mac" else ("ctrl", "a")
-    pyautogui.hotkey(*select_all)
-    time.sleep(0.1)
-    pyautogui.press("delete")
-    time.sleep(0.1)
-    _paste_text(text)
-
-def _open_app(app_name: str) -> bool:
-    _require_pyautogui()
-    os_name = _get_os()
-
-    try:
-        if os_name == "windows":
-            pyautogui.press("win")
-            time.sleep(0.5)
-            _paste_text(app_name)
-            time.sleep(0.6)
-            pyautogui.press("enter")
-            time.sleep(2.5)
-            return True
-
-        elif os_name == "mac":
-            result = subprocess.run(
-                ["open", "-a", app_name],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                result = subprocess.run(
-                    ["open", "-a", f"{app_name}.app"],
-                    capture_output=True, text=True, timeout=10,
-                )
-            time.sleep(2.5)
-            return result.returncode == 0
-
-        else: 
-            launched = False
-            for launcher in [
-                ["gtk-launch", app_name.lower()],
-                [app_name.lower()],
-            ]:
-                try:
-                    subprocess.Popen(
-                        launcher,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    launched = True
-                    break
-                except FileNotFoundError:
-                    continue
-            time.sleep(2.5)
-            return launched
-
-    except Exception as e:
-        print(f"[SendMessage] ⚠️ Could not open {app_name}: {e}")
-        return False
+def _box():
+    """The focused message box: (Focus, editable?)."""
+    from core import desktop_state as ds
+    f = ds.focused_control()
+    return f, bool(f and f.control_type in ("Edit", "Document"))
 
 
-def _open_browser_url(url: str) -> bool:
-    import webbrowser
-    try:
-        webbrowser.open(url)
-        time.sleep(4.0) 
-        return True
-    except Exception as e:
-        print(f"[SendMessage] ⚠️ Could not open browser: {e}")
-        return False
+def _bring_app(app: str) -> str:
+    """The app's window in front; "" or why not."""
+    from actions import computer_control as cc
+    from actions.open_app import open_app
+    from core import desktop_state as ds
+    exe = _APPS.get(app, app)
+    if not any(w.exe == exe for w in ds.windows()):
+        open_app({"app_name": app})
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        wins = [w for w in ds.windows() if w.exe == exe]
+        if wins:
+            fg = ds.foreground() or {}
+            if fg.get("hwnd") not in {w.hwnd for w in wins}:
+                cc._bring_forward(max(wins, key=lambda w: len(w.title)).hwnd)
+                time.sleep(0.5)
+            if (ds.foreground() or {}).get("exe") == exe:
+                return ""
+        time.sleep(0.4)
+    return f"{app.title()} did not come to the front"
 
-def _search_in_app(query: str) -> None:
-    _require_pyautogui()
-    os_name = _get_os()
-    search_hotkey = ("command", "f") if os_name == "mac" else ("ctrl", "f")
 
-    pyautogui.hotkey(*search_hotkey)
-    time.sleep(0.5)
-    _clear_and_paste(query)
-    time.sleep(1.0)
-
-def _desktop_send(app_name: str, receiver: str, message: str) -> str:
-    if not _open_app(app_name):
-        return f"Could not open {app_name}."
-
-    time.sleep(1.0)
-    _search_in_app(receiver)
-    pyautogui.press("enter")
-    time.sleep(0.8)
-
-    _paste_text(message)
-    time.sleep(0.2)
-    pyautogui.press("enter")
+def open_conversation(platform: str, receiver: str) -> tuple[bool, str]:
+    """(confirmed?, what happened)."""
+    from actions import computer_control as cc
+    from core import desktop_state as ds
+    app = _app_key(platform)
+    if _OS != "Windows":
+        return False, f"opening a conversation is only checked on Windows; nothing was done in {app}"
+    why = _bring_app(app)
+    if why:
+        return False, why
+    if _names_receiver(receiver):
+        return True, f"{receiver}'s conversation is already open"
+    # Esc first: Slack's Ctrl+K toggles. Seen live — a search box left open by
+    # the previous attempt was CLOSED by the next Ctrl+K, and "#new-channel"
+    # was pasted into Jane's message box instead.
+    pyautogui.press("escape")
     time.sleep(0.3)
-    return f"Message sent to {receiver} via {app_name}."
-
-def _send_whatsapp(receiver: str, message: str) -> str:
-    """WhatsApp goes through the verified driver when there is one.
-
-    _desktop_send below is a sequence of keystrokes with sleeps between them:
-    it presses Win, types the app name, presses Ctrl+F, types the contact,
-    presses Enter twice and reports success — without ever reading back which
-    window received any of that. When the machine is a second slower than the
-    sleeps assume, the whole sequence lands somewhere else and the user is
-    still told the message was sent.
-
-    plugins/_whatsapp_core.py already drives WhatsApp properly for the calling
-    plugins: it finds the real window, opens the conversation, checks the
-    conversation is the right person's, types, and confirms the box emptied
-    before it says "sent". Using it here costs nothing and removes the one
-    failure that matters — a message reported as delivered that never left.
-
-    The blind path stays as the fallback for a machine where the driver cannot
-    run at all (the plugin file removed, a missing dependency, no WhatsApp).
-    But once the driver HAS run, its answer stands: falling back after it
-    refused to send is how a message ends up typed into the wrong
-    conversation, which is worse than not sending it.
-    """
-    try:
-        from plugins import _whatsapp_core as wa
-    except Exception as e:
-        print(f"[SendMessage] WhatsApp driver unavailable ({e}) — typing blind.")
-        return _desktop_send("WhatsApp", receiver, message)
-
-    try:
-        transport, why = wa.get()
-    except Exception as e:
-        print(f"[SendMessage] WhatsApp driver failed to start ({e}) — typing blind.")
-        return _desktop_send("WhatsApp", receiver, message)
-
-    if transport is None:
-        print(f"[SendMessage] {why} — typing blind.")
-        return _desktop_send("WhatsApp", receiver, message)
-
-    sent, failure = transport.send_message_to(receiver, message)
-    if sent:
-        return f"Message sent to {receiver} via WhatsApp."
-    return (f"The message to {receiver} was NOT sent on WhatsApp: {failure}. "
-            f"Tell the user plainly that it was not sent, and why - do not "
-            f"say it was sent.")
-
-def _send_telegram(receiver: str, message: str) -> str:
-    return _desktop_send("Telegram", receiver, message)
-
-def _send_signal(receiver: str, message: str) -> str:
-    return _desktop_send("Signal", receiver, message)
+    pyautogui.hotkey(*_JUMP.get(app, _JUMP_DEFAULT))
+    time.sleep(0.7)
+    f = ds.focused_control()
+    if f is not None and f.control_type in ("Edit", "Document") and cc._COMPOSE_RE.search(f.name or ""):
+        return False, (f"{app.title()}'s jump-to box did not open (the message box still has the "
+                       "focus), so nothing was typed")
+    cc._paste_text(_bare(receiver) if app in _JUMP else receiver)
+    picked, offered = _pick_result(receiver)
+    if picked is None:
+        pyautogui.press("escape")
+        if offered:
+            return False, (f"{app.title()} offered {', '.join(repr(o) for o in offered[:6])} for "
+                           f"'{receiver}', none of them exactly; nothing was opened. Say which one")
+        return False, f"{app.title()} found nothing for '{receiver}'; nothing was opened"
+    if picked:
+        pyautogui.click(*picked)
+    else:
+        pyautogui.press("enter")          # the app does not list its results to UIA
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        time.sleep(0.4)
+        if _names_receiver(receiver):
+            return True, f"{receiver}'s conversation is open"
+    title = ((ds.foreground() or {}).get("title") or "")[:70]
+    return False, (f"I searched for '{receiver}', but the conversation that opened ('{title}') "
+                   f"does not show that name. Use the name exactly as it appears in {app.title()}")
 
 
-def _send_discord(receiver: str, message: str) -> str:
-    return _desktop_send("Discord", receiver, message)
+def _pick_result(receiver: str, wait_s: float = 3.0):
+    """The jump box's result for `receiver`, read from UI Automation once the
+    app has listed it: ((x, y) to click, names offered). (None, names) when
+    the list shows other names only; ((), []) when the app lists nothing to
+    UIA, so Enter is all there is. Seen live: Enter 1.4 s after the paste,
+    without looking, opened nothing while the right channel sat in the list."""
+    from core import desktop_state as ds
+    want = _norm(_bare(receiver))
+    offered: list[str] = []
+    listed = False
+    deadline = time.monotonic() + wait_s
+    while True:
+        fg = ds.foreground() or {}
+        found = [c for c in ds.controls(fg.get("hwnd") or 0)
+                 if c["type"] in (50007, 50024) and c["name"].strip()]
+        listed = listed or bool(found)
+        items = [c for c in found if not c["name"].lower().startswith(("search for", "шукати"))]
+        # "Jane Doe, Direct Message": the name is before the comma.
+        exact = [c for c in items if _norm(_bare(c["name"].split(",")[0])) == want]
+        if len(exact) == 1:
+            l, t, r, b = exact[0]["rect"]
+            return ((l + r) // 2, (t + b) // 2), []
+        if len(exact) > 1:
+            return None, [c["name"] for c in exact]
+        offered = [c["name"][:40] for c in items if want.split()[0] in _norm(c["name"])] if want else []
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.3)
+    if offered or listed:
+        # The app lists its results and none is this name: Enter would only
+        # open a search page (seen live).
+        return None, offered
+    return (), []
 
 
-def _send_instagram(receiver: str, message: str) -> str:
-    _require_pyautogui()
-
-    if not _open_browser_url("https://www.instagram.com/direct/new/"):
-        return "Could not open Instagram in browser."
-
-    _paste_text(receiver)
-    time.sleep(1.5)
-
-    pyautogui.press("down")
+def _draft(platform: str, receiver: str, text: str) -> str:
+    global _last_draft
+    from actions import computer_control as cc
+    from core import desktop_state as ds
+    from core import verify as v
+    ok, what = open_conversation(platform, receiver)
+    if not ok:
+        _tl.verdict = v.failed(what)
+        return f"Could not open the conversation: {what}. Nothing was typed."
+    f, editable = _box()
+    if not editable:
+        _tl.verdict = v.failed("the message box does not have the focus")
+        return (f"{what}, but its message box does not have the keyboard focus, so nothing was "
+                "typed.")
+    replaced = ""
+    if f.value and f.value.strip():
+        replaced = f" It replaced an earlier unsent draft: '{f.value.strip()[:60]}'."
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(0.1)
+        pyautogui.press("delete")
+        time.sleep(0.1)
+    cc._paste_text(text)
     time.sleep(0.3)
-    pyautogui.press("enter")   
-    time.sleep(0.4)
-
-    for _ in range(4):
-        pyautogui.press("tab")
-        time.sleep(0.15)
-    pyautogui.press("enter")
-    time.sleep(2.0)
-
-    _paste_text(message)
-    time.sleep(0.2)
-    pyautogui.press("enter")
-    time.sleep(0.3)
-
-    return f"Message sent to {receiver} via Instagram."
+    f2, _ = _box()
+    fg = ds.foreground() or {}
+    _last_draft = {"hwnd": fg.get("hwnd"), "app": _app_key(platform), "receiver": receiver,
+                   "field": (f2.name if f2 else "") or "the message box"}
+    if f2 is not None and f2.value is not None and _norm(text) and _norm(text) in _norm(f2.value):
+        _tl.verdict = v.verified(f"the text is in '{_last_draft['field']}' and has NOT been sent")
+    elif f2 is not None and f2.value is not None and _norm(text):
+        _tl.verdict = v.unverified("the message box shows other text than what was typed")
+    else:
+        _tl.verdict = v.unverified("the message box does not let me read the text back")
+    return (f"[DRAFT] {what}; the message is typed into '{_last_draft['field']}' and NOT sent."
+            f"{replaced} Tell the user it is ready for them to read and change. Send it only "
+            f"when they ask: send_message with action='send'.")
 
 
-def _send_messenger(receiver: str, message: str) -> str:
-    _require_pyautogui()
+def _send(params: dict) -> str:
+    from actions import computer_control as cc
+    from core import desktop_state as ds
+    from core import verify as v
+    d = _last_draft
+    if d and d.get("hwnd") and ds.window(d["hwnd"]):
+        if (ds.foreground() or {}).get("hwnd") != d["hwnd"]:
+            cc._refocus(d["hwnd"])
+    c = cc._compose_target()
+    if c is None:
+        where = f" in {d['app'].title()}" if d else ""
+        _tl.verdict = None
+        return (f"Could not send: no message box with text has the focus{where}. Nothing was "
+                "sent. Write the message first (send_message with action='draft').")
+    to = f" to {d['receiver']}" if d and d.get("hwnd") == c["hwnd"] else ""
 
-    if not _open_browser_url("https://www.messenger.com/"):
-        return "Could not open Messenger in browser."
+    def press() -> None:
+        pyautogui.press("enter")
+
+    held = cc.send_guard(dict(params, action="press"), "enter", press,
+                         tool="send_message with action='send'", to=to)
+    if held:
+        _tl.verdict = None
+        return held
+    press()
+
+    def look():
+        f = ds.focused_control()
+        if f is not None and f.same_control(c["focus"]) and f.value is not None:
+            if not f.value.strip():
+                return v.verified("the message box is empty — the message went")
+            if c["text"] and _norm(f.value) == _norm(c["text"]):
+                return v.failed("the text is still in the box — it was not sent")
+        return v.unverified("I could not read the message box after Enter")
+    _tl.verdict = v.poll(look)
+    return f"Pressed Enter in '{c['field']}'{to}."
 
 
-    _search_in_app(receiver)
-    time.sleep(0.5)
-    pyautogui.press("down")
-    time.sleep(0.3)
-    pyautogui.press("enter")
-    time.sleep(1.0)
-
-    _paste_text(message)
-    time.sleep(0.2)
-    pyautogui.press("enter")
-    time.sleep(0.3)
-
-    return f"Message sent to {receiver} via Messenger."
-
-_PLATFORM_MAP = [
-    ({"whatsapp", "wp", "wapp"},              _send_whatsapp),
-    ({"telegram", "tg"},                      _send_telegram),
-    ({"instagram", "ig", "insta"},            _send_instagram),
-    ({"signal"},                               _send_signal),
-    ({"discord"},                              _send_discord),
-    ({"messenger", "facebook", "fb"},         _send_messenger),
-]
-
-
-def _resolve_platform(platform_str: str):
-    key = platform_str.lower().strip()
-    for keywords, handler in _PLATFORM_MAP:
-        if any(k in key for k in keywords):
-            return handler
-    return lambda r, m: _desktop_send(platform_str.strip().title(), r, m)
-
-
-def send_message(
-    parameters: dict,
-    response=None,
-    player=None,
-    session_memory=None,
-) -> str:
-    params       = parameters or {}
-    receiver     = params.get("receiver", "").strip()
-    message_text = params.get("message_text", "").strip()
-    platform     = params.get("platform", "whatsapp").strip()
-
-    if not receiver:
-        return "Please specify a recipient."
-    if not message_text:
-        return "Please specify the message content."
+def send_message(parameters: dict, response=None, player=None, session_memory=None) -> str:
+    params = parameters or {}
+    receiver = str(params.get("receiver", "")).strip()
+    text = str(params.get("message_text", "")).strip()
+    platform = str(params.get("platform", "")).strip() or "Slack"
+    action = str(params.get("action", "")).strip().lower() or ("draft" if text else "open")
+    _tl.verdict = None
     if not _PYAUTOGUI:
         return "PyAutoGUI is not installed — cannot control the desktop."
-
-    preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
-    print(f"[SendMessage] 📨 {platform} → {receiver}: {preview}")
     if player:
-        player.write_log(f"[msg] {platform} → {receiver}")
-
+        player.write_log(f"[msg] {action} {platform} {receiver}")
+    print(f"[SendMessage] {action} {platform} → {receiver}: {text[:50]}")
     try:
-        handler = _resolve_platform(platform)
-        result  = handler(receiver, message_text)
+        if action == "send":
+            return _send(params)
+        if not receiver:
+            return "Please specify who the message is for."
+        if action == "open":
+            from core import verify as v
+            ok, what = open_conversation(platform, receiver)
+            _tl.verdict = v.verified(what) if ok else v.failed(what)
+            return (f"{what}." if ok else f"Could not open the conversation: {what}.")
+        if not text:
+            return "Please specify the message text."
+        return _draft(platform, receiver, text)
     except Exception as e:
-        result = f"Could not send message: {e}"
+        return f"Could not {action} the message: {e}"
 
-    # "NOT sent" contains "sent". The old test read that as a success and put a
-    # tick next to a message that never went.
-    lowered = result.lower()
-    ok = "sent" in lowered and "not sent" not in lowered
-    print(f"[SendMessage] {'✅' if ok else '❌'} {result}")
-    if player:
-        player.write_log(f"[msg] {result}")
 
-    return result
+def _verify(params: dict, result, before):
+    v = getattr(_tl, "verdict", None)
+    _tl.verdict = None
+    return v
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "send_message",
     "description": (
-        "Sends a text message via WhatsApp, Telegram, or another messaging "
-        "platform. Write 'message_text' in the USER'S OWN LANGUAGE, exactly "
-        "what they asked to be said. If the result says the message was NOT "
-        "sent, repeat that plainly along with the reason it gives — never "
-        "tell the user a message was sent unless the result said it was."
+        "Writes to a person in a desktop messenger (Slack, Discord, Telegram, Teams, WhatsApp…), "
+        "in two steps the user controls. action='draft' (the default): opens the conversation "
+        "with `receiver` and types `message_text` into its message box WITHOUT sending, so the "
+        "user can read and change it. action='send' — only when the user says to send it: sends "
+        "what is in the box now, after asking them ([CONFIRM_SEND]); once they say yes, call "
+        "again with action='send' and confirmed=true. action='open': just opens that person's "
+        "conversation ('find Jane in Slack', 'open my chat with…'). `receiver` is the name as the "
+        "app shows it — usually in Latin letters ('Jane Doe'). Write `message_text` in "
+        "the user's own language, exactly what they asked to say. Never say a message was sent "
+        "unless the result says so."
     ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
+            "action": {
+                "type": "STRING",
+                "description": "draft (default when there is text) | send | open"
+            },
             "receiver": {
                 "type": "STRING",
-                "description": "Recipient contact name"
+                "description": "The person, as the app names them"
             },
             "message_text": {
                 "type": "STRING",
-                "description": "The message to send"
+                "description": "draft: the message to type"
             },
             "platform": {
                 "type": "STRING",
-                "description": "Platform: WhatsApp, Telegram, etc."
+                "description": "Slack, Discord, Telegram, Teams, WhatsApp… (default Slack)"
+            },
+            "confirmed": {
+                "type": "BOOLEAN",
+                "description": "send: only on the follow-up call after [CONFIRM_SEND], once the user said yes"
             }
         },
-        "required": [
-            "receiver",
-            "message_text",
-            "platform"
-        ]
+        "required": []
     },
     "handler": send_message,
+    "verify": _verify,
 }

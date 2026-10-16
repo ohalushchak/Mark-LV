@@ -2,10 +2,17 @@
 
 What works, what is left, and known issues. Upstream releases up to Mark LV are described in `readme.md`; this file tracks the fork from there.
 
-_Last updated: 2026-10-15_
+_Last updated: 2026-10-16_
 
 ## Done in this fork
 
+- Computer use with verified results, mixed from forks (tests in `tests/test_verify.py`, `test_verified_actions.py`, `test_send_gate.py`, `test_computer_use.py`). Tried live on Windows in eight sessions; `empty_trash` and the computer-use pause before a risky step are not yet seen live.
+  - **Verdicts:** `TOOL["snapshot"]` / `TOOL["verify"]` run by the action loader; results end with [VERIFIED] / [UNVERIFIED] / [FAILED] (bfrpaulondev's postconditions, syamsulmuiin's "no evidence = unverified"); a FAILED verdict counts in tool health.
+  - **Checked actions:** `open_app` (new window / process, an app already running is brought forward), `computer_control` (pointer, focus, a noise-masked screen sample, the focused field read back), `computer_settings` (volume, mute, brightness, theme, window state on a named window), `file_controller` (the disk read back), `browser_control` (page state before/after, BlackStarG5; the real browser's address bar through UIA).
+  - **Finding:** `screen_click` / `screen_find` by UIA name, then vision with a native-resolution second look, mapped through the monitor's rectangle, refusing ambiguous and unlike matches (rilzisheree's coordinate proof); `screen_process` and both take `monitor` (cursor / primary / left / right / number).
+  - **Messages:** `send_message` opens the conversation (Slack / Discord jump box, the matching result picked from UIA), types a draft and leaves it; `send` asks through `core/send_gate.py` (voice answer or HUD CONFIRM). Enter in a chat box and Send buttons go through the same gate.
+  - **Computer use:** `computer_use` → `core/computer_use.py` (bfrpaulondev's loop without its provider router, JishnuDevTech's re-locating, rilzisheree's yes/no/unknown final check); risky steps by the real UIA label pause for the user's yes; moving the mouse stops it.
+  - **Fixed on the way:** pycaw 2025's API (volume read/set had silently failed), explicit mute/unmute, `ShowWindow` minimise/maximise, layout-free typing, focus without the Alt tap, `ms-settings:` links kept by `open_app`, `empty_trash` instead of clicking cleanup lists.
 - Self-check and self-repair, mixed from forks (tests in `tests/test_tool_health.py`, `test_self_check.py`, `test_self_repair.py`, `test_repair_panel.py`). Tried live on Windows with Claude Code up to APPLY and the restart; the agent ring, undo after restart and the watchdog rollback are not yet seen live.
   - **Honest results:** tool arguments checked against the schema before anything runs, with a "nothing ran, correct X" refusal (BlackStarG5); no result is reported as unverified instead of "Done.".
   - **Health:** a redacted error journal and per-tool green / yellow / red (klcenka9's thresholds, syamsulmuiin's redaction); uncaught thread and asyncio errors journaled.
@@ -45,14 +52,13 @@ Upstream roadmap "LVI+" (interrupt by voice is done):
 
 Fork backlog (deferred by the user, 2026-10-14):
 
-- [ ] Monitor choice for `screen_process` (see Known issues). Plan: a `monitor` parameter — default the screen under the cursor (today's behaviour), or `primary`, a number, `left`/`right`, or `all`. `all` sends each monitor as its own image in the same turn (each compressed to 1280×720), never one stitched 7280-px-wide frame whose text cannot be read; `_capture_screen` then returns a list and `_flush_pending_vision` sends several `inline_data` parts. The tool description must tell the model to use it when asked about "the other monitor"/"all screens".
+- [ ] `screen_process` with `monitor='all'`: each monitor as its own image in the same turn (each compressed to 1280×720), never one stitched 7280-px-wide frame. Choosing one monitor is done.
 
 ## Known issues
 
 - `ui.py` reuses names easily: a new `JarvisUI` / `MainWindow` member with an existing name silently replaces the old one (it happened with `show_review` / `_review_sig`). Check with a grep before adding one.
 - Tool health sees a handler's caught error only when it calls `health.failed(why)` or its sentence starts like a failure ("Error…", "Failed…"); most actions still return their errors as plain sentences, so their status stays green.
 - Self-repair restart: the new instance runs on the old one's console, so the shell prompt comes back while JARVIS keeps printing. Restart and rollback are untested on macOS and Linux.
-- `screen_process` cannot be pointed at another monitor: it always takes the one under the cursor. Seen live: Task Manager opened on another screen, the model asked to "check the other monitor" four times and got the same screen each time. Fix planned under *Left to build* → Fork backlog.
 - After a `screen_process` call the model often starts a short acknowledgement, and the image turn interrupts it (seen live: 0.2–5 s of speech discarded per capture).
 - Voice barge-in: background speech (a television, people in the room) still gets transcribed as words and confirms a pause; interrupt-by-name is the answer for such rooms. A short "stop" (< 0.64 s) no longer interrupts by voice.
 - Wake engines are verified only on Windows TTS speech, not a real microphone. Grammar-restricted Vosk can mistake similar words (an English test heard "market" as "marco"); two-word phrases are more reliable.
@@ -71,3 +77,9 @@ Fork backlog (deferred by the user, 2026-10-14):
 - Codex's sandbox writes files as a sandbox user: in folders with owner-only ACLs (Python's `mkdtemp`) the user cannot read them. Codex may ask to trust the relay hook in its next interactive session.
 - The agent-session relay cannot see whether the user is looking at the session; it relies on the 30 s minimum turn. A permission prompt counts as answered when its transcript file changes, a heuristic.
 - `run_command` output from cmd-era tools is decoded with the OEM code page only when it is not valid UTF-8.
+- After "Server reports interruption" the model sometimes repeats the same tool call: in Slack a `type` ran twice. Not guarded — a repeat cannot yet be told from a new request ("louder" said twice).
+- Vision calls (screen_click by sight, computer use) take 10–60 s on this key: 3.6-flash and 3.5-flash run out of quota and flash-latest times out, so the ladder falls to the Live rung; each computer-use run spends several calls.
+- Verification, finding by UIA name, the send gate's message-box detection, conversation jumps and computer use work on Windows only; elsewhere the verdict is UNVERIFIED and `send_message` refuses to open a conversation. Conversation jumps are tuned for Slack (Ctrl+K, results read from UIA); Discord shares the shortcut, Telegram / Teams / WhatsApp fall back to Ctrl+F + Enter and are untried.
+- `screen_click`'s label check cannot compare an English description with a Ukrainian label, so it trusts such matches.
+- `empty_trash` waits for the HUD button only (no voice yes), like the other irreversible actions behind `core/confirm.py`.
+- A click is VERIFIED when the window in front, the focused control or the screen near it changed — a change caused by something else in that half-second (Snap Assist appearing) is credited to the click.
