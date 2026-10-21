@@ -301,3 +301,25 @@ def test_settings_enter_gets_the_submitted_check(monkeypatch):
     monkeypatch.setattr("actions.computer_control._verify", lambda p, r, b: seen.append(p) or None)
     cs._verify({"action": "enter"}, "Done: enter.", {"fg": None})
     assert seen == [{"action": "press", "key": "enter"}]
+
+
+def test_confirmed_before_any_question_asks_instead_of_refusing(monkeypatch):
+    """Seen live: on "send it" the model passed confirmed=true at once, got
+    [NOT_SENT] twice, and told the user the screen showed no confirmation."""
+    typed, keys, state = _messenger(monkeypatch)
+    state["value"] = "Привіт, як справи?"                         # the draft in the box
+    monkeypatch.setattr(cc.platform, "system", lambda: "Windows")
+    from core import desktop_state as ds
+    monkeypatch.setattr(ds, "is_me", lambda pid: False)
+    out = sm.send_message({"action": "send", "confirmed": True})
+    assert out.startswith("[CONFIRM_SEND]") and keys == []          # asked, nothing pressed
+    assert sm.send_message({"action": "send", "confirmed": True}).startswith("[NOT_SENT]")
+    assert keys == []                                              # still the user's word first
+
+
+def test_an_emoji_only_draft_is_read_back(monkeypatch):
+    """Seen live: "😡" typed into Viber was reported as unreadable."""
+    typed, keys, _ = _messenger(monkeypatch, value_after="😡")
+    monkeypatch.setattr(sm, "open_conversation", lambda p, r: (True, f"{r}'s conversation is open"))
+    out = sm.send_message({"receiver": "Остапчик", "message_text": "😡", "platform": "Viber"})
+    assert out.startswith("[DRAFT]") and sm._verify({}, out, None).state == verify.VERIFIED

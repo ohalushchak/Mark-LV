@@ -677,3 +677,16 @@ def get_notes_vault() -> str:
 
 def save_notes_vault(path: str) -> None:
     _save_flag("notes_vault", str(path or "").strip())
+
+
+# ── Messages: the chats whose new messages are announced (core/message_watch.py) ──
+
+def get_message_watch() -> list[str]:
+    """People and chats (as the user named them) whose new messages are
+    announced by voice. Empty: nothing is announced."""
+    raw = load_api_keys().get("message_watch")
+    return [str(x).strip() for x in raw if str(x).strip()] if isinstance(raw, list) else []
+
+
+def save_message_watch(names: list[str]) -> None:
+    _save_flag("message_watch", list(dict.fromkeys(str(n).strip() for n in names if str(n).strip())))

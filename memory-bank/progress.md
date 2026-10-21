@@ -6,6 +6,13 @@ _Last updated: 2026-10-21_
 
 ## Done in this fork
 
+- Messengers and calls, mixed from forks (tests in `tests/test_contacts.py`, `test_messengers.py`, `test_calls.py`, `test_message_watch.py`, `test_send_gate.py`; ADR-025 – ADR-027). Tried live on Windows with a real contact.
+  - **Contacts:** `core/contacts.py` + the `contacts` tool (find, list, add, rename, remove, undo); `config/contacts.json` is git-ignored. Nathan123y's refuse-rather-than-guess lookup, Kira's margin rule, masked numbers, emergency numbers refused.
+  - **Messages:** `send_message` drafts and sends in Telegram (search box, Type/Name cells, the title names the chat) and Viber (opened by phone number, bubbles must change) besides Slack; a confirmed=true that nobody asked about now asks first. Live: drafts, sends after the yes, emoji-only drafts.
+  - **Calls:** the `call` tool (start, accept, decline, end, status) and `core/calls.py` (mic privacy record, audio capture sessions, call windows; Viber's buttons found by colour). Live in Viber: dial ("Безплатний дзвінок Viber"), decline, accept after the yes, hang up; in Telegram: dial ("Start Call"), hang up. While a call is on, `main._run_call_watch` keeps the assistant asleep and silent — seen live.
+  - **Reading:** `read_messages` (Viber's open chat marked theirs / the user's; Telegram's last message per chat or its unread chats, nothing marked read) — live in both.
+  - **New messages:** `watch_messages` + `core/message_watch.py` read Windows' notification database (Slack; the phone's messengers through Phone Link) and announce chats the user named (`main._run_message_watch`).
+  - **Fixed on the way:** call / Send-like buttons clicked by `screen_click` or computer use now go through the send gate; the console log no longer prints message text; a COM double release (pycaw's `cast`) that killed the process.
 - `docs/PRD.md` and `docs/ADR.md`: the product requirements (with built / partly tried / planned status) and the architecture decisions with their reasons and rejected alternatives, linked from `CLAUDE.md`.
 - Memory in SQLite with search by meaning, mixed from forks (tests in `tests/test_memory_store.py`, `test_memory_search.py`, `test_memory_trust.py`, `test_notes_index.py`, `test_notes_edit.py`, `test_memory_panel.py`). Tried live on Windows in five sessions.
   - **Store:** `memory/memory.db` with facts, history, suggestions, session summaries, the notes index and vectors (TeddyDARKVADOR's schema ideas with INTEGER rowids; maseko-lucky-9's migration recipe; bfrpaulondev's provenance). `long_term.json` migrated and kept as `.bak`; monitors moved to DB state.
@@ -60,6 +67,8 @@ Upstream roadmap "LVI+" (interrupt by voice is done):
 Fork backlog (deferred by the user, 2026-10-14):
 
 - [ ] Alternatives to Gemini Live (parked 2026-10-16): a Claude rung in `core/gemini.py`, then local STT/TTS with Claude Code as the brain behind a mode switch. Research, measurements and plan: `docs/research/gemini-alternatives/README.md`.
+- [ ] Messengers stage 5 (chosen by the user): the assistant speaks into a call — rilzisheree's `messenger_audio_bridge` (VB-CABLE in, loopback out), its own Live session with an AI disclosure; echo and Phone Link audio still to solve.
+- [ ] Viber chats without a phone number (shops, groups): open through Viber's search and confirm the header by vision.
 - [ ] `screen_process` with `monitor='all'`: each monitor as its own image in the same turn (each compressed to 1280×720), never one stitched 7280-px-wide frame. Choosing one monitor is done.
 
 ## Known issues
@@ -89,7 +98,13 @@ Fork backlog (deferred by the user, 2026-10-14):
 - `run_command` output from cmd-era tools is decoded with the OEM code page only when it is not valid UTF-8.
 - After "Server reports interruption" the model sometimes repeats the same tool call: in Slack a `type` ran twice. Not guarded — a repeat cannot yet be told from a new request ("louder" said twice).
 - Vision calls (screen_click by sight, computer use) take 10–60 s on this key: 3.6-flash and 3.5-flash run out of quota and flash-latest times out, so the ladder falls to the Live rung; each computer-use run spends several calls.
-- Verification, finding by UIA name, the send gate's message-box detection, conversation jumps and computer use work on Windows only; elsewhere the verdict is UNVERIFIED and `send_message` refuses to open a conversation. Conversation jumps are tuned for Slack (Ctrl+K, results read from UIA); Discord shares the shortcut, Telegram / Teams / WhatsApp fall back to Ctrl+F + Enter and are untried.
+- Verification, finding by UIA name, the send gate's message-box detection, conversation jumps, calls and computer use work on Windows only; elsewhere the verdict is UNVERIFIED and `send_message` refuses to open a conversation. Slack (Ctrl+K), Telegram and Viber are tried live; Discord shares Slack's shortcut, Teams / WhatsApp fall back to Ctrl+F + Enter and are untried.
+- Viber: a chat opens only by phone number, so shops and groups cannot be written to or read; the first open after a start may take a vision look at the header (up to a minute on this key) when that chat was already on screen. `read_messages` sees only the bubbles on screen; Telegram shows only each chat's latest message.
+- Viber's call buttons are found by colour (its call windows show UIA nothing), so a Viber redesign can break decline / accept / hang up there; the `[Calls]` console lines describe what a call window offers.
+- Calls not yet tried live: Slack huddles, Phone Link (`tel:` is not set as the default handler on this PC), an incoming Telegram call. Video works in Telegram and Viber only.
+- With the wake word off, the assistant cannot be woken by voice during a call (the mic stays closed); typed text wakes it, and then it hears the call until it ends.
+- New-message announcements come only from Windows notifications: Telegram and Viber on the PC write none, so their messages are seen through the phone (Phone Link). Not yet heard live.
+- `actions/computer_settings.py` still uses pycaw's `cast(...)` for the volume interface — the pattern that crashed call detection with a double release.
 - `screen_click`'s label check cannot compare an English description with a Ukrainian label, so it trusts such matches.
 - `empty_trash` waits for the HUD button only (no voice yes), like the other irreversible actions behind `core/confirm.py`.
 - A click is VERIFIED when the window in front, the focused control or the screen near it changed — a change caused by something else in that half-second (Snap Assist appearing) is credited to the click.

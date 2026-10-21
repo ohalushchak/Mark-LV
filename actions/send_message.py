@@ -22,6 +22,12 @@ Now, on Windows:
            what is asked about, and on the user's yes Enter is pressed and the
            box must come back empty.
 
+Telegram and Viber open their conversations their own way (2026-10-21,
+actions/_messengers.py): Telegram through its search box, its results read
+as Type/Name cells and the chat confirmed by the window title; Viber, which
+names nothing to UIA, by the person's phone number. Who the person is comes
+from the user's contacts (core/contacts.py) when they list them.
+
 Text goes in through the clipboard (computer_control._paste_text), so it does
 not depend on the keyboard layout.
 """
@@ -128,6 +134,23 @@ def _bring_app(app: str) -> str:
     return f"{app.title()} did not come to the front"
 
 
+def _who(receiver: str, app: str):
+    """(name as the app shows them, phone, why not) — through the user's
+    contacts (core/contacts.py) when they list this person. A name the
+    contacts do not know goes to the app's own search as said; several
+    people under one name is a question, never the first one."""
+    from core import contacts as cb
+    found = cb.resolve(receiver)
+    if found.contact is not None:
+        c = found.contact
+        if c.phone and cb.is_emergency(c.phone):
+            return "", "", "that is an emergency number; the assistant never writes to one"
+        return c.in_app(app), c.phone, ""
+    if found.ambiguous:
+        return "", "", f"{found.why}. Ask the user which one: {cb.describe(found.candidates)}"
+    return receiver, "", ""
+
+
 def open_conversation(platform: str, receiver: str) -> tuple[bool, str]:
     """(confirmed?, what happened)."""
     from actions import computer_control as cc
@@ -135,9 +158,41 @@ def open_conversation(platform: str, receiver: str) -> tuple[bool, str]:
     app = _app_key(platform)
     if _OS != "Windows":
         return False, f"opening a conversation is only checked on Windows; nothing was done in {app}"
+    name, phone, why = _who(receiver, app)
+    if why:
+        return False, why
+    if app == "viber":
+        # Viber shows UIA no names at all: only the number opens the right chat
+        # for certain (actions/_messengers.py).
+        from core import contacts as cb
+        if not cb.international(phone):
+            return False, (f"Viber chats are opened by phone number, and there is no number with "
+                           f"a country code for '{receiver}'. Add it: contacts action='add' with "
+                           "phone (+380…)")
     why = _bring_app(app)
     if why:
         return False, why
+    hwnd = (ds.foreground() or {}).get("hwnd") or 0
+    if app == "telegram":
+        # The contact may know Telegram's name for them only under another
+        # app (seen live: "Остапчик" saved for Viber was Telegram's name too).
+        from actions import _messengers
+        from core import contacts as cb
+        c = cb.resolve(receiver).contact
+        names = [name, receiver, *((c.aliases + list(c.apps.values())) if c else [])]
+        ok, what = False, ""
+        for n in dict.fromkeys(x.strip() for x in names if x and x.strip()):
+            ok, what = _messengers.telegram_open(hwnd, n)
+            if ok or "found nobody" not in what:
+                break
+        return ok, what
+    if app == "viber":
+        from actions import _messengers
+        from core import contacts as cb
+        c = cb.resolve(receiver).contact
+        names = [name, *([c.name, *c.aliases] if c else [])]
+        return _messengers.viber_open(hwnd, phone, name, names)
+    receiver = name
     if _names_receiver(receiver):
         return True, f"{receiver}'s conversation is already open"
     # Esc first: Slack's Ctrl+K toggles. Seen live — a search box left open by
@@ -237,6 +292,11 @@ def _draft(platform: str, receiver: str, text: str) -> str:
                    "field": (f2.name if f2 else "") or "the message box"}
     if f2 is not None and f2.value is not None and _norm(text) and _norm(text) in _norm(f2.value):
         _tl.verdict = v.verified(f"the text is in '{_last_draft['field']}' and has NOT been sent")
+    elif (f2 is not None and f2.value is not None and not _norm(text)
+            and "".join(text.split()) in "".join(f2.value.split())):
+        # Emoji only ("😡", seen live in Viber): _norm leaves nothing to compare,
+        # so the raw characters are — Viber keeps them as typed.
+        _tl.verdict = v.verified(f"the text is in '{_last_draft['field']}' and has NOT been sent")
     elif f2 is not None and f2.value is not None and _norm(text):
         _tl.verdict = v.unverified("the message box shows other text than what was typed")
     else:
@@ -276,6 +336,10 @@ def _send(params: dict) -> str:
         f = ds.focused_control()
         if f is not None and f.same_control(c["focus"]) and f.value is not None:
             if not f.value.strip():
+                if c["app"] == "viber" and c["text"]:
+                    from actions import _messengers
+                    if _messengers.viber_sent(c["hwnd"], c["text"]):
+                        return v.verified("the box is empty and the message shows in the chat")
                 return v.verified("the message box is empty — the message went")
             if c["text"] and _norm(f.value) == _norm(c["text"]):
                 return v.failed("the text is still in the box — it was not sent")
@@ -295,7 +359,8 @@ def send_message(parameters: dict, response=None, player=None, session_memory=No
         return "PyAutoGUI is not installed — cannot control the desktop."
     if player:
         player.write_log(f"[msg] {action} {platform} {receiver}")
-    print(f"[SendMessage] {action} {platform} → {receiver}: {text[:50]}")
+    # The length only: a console log is no place for somebody's message (Blobby132).
+    print(f"[SendMessage] {action} {platform} → {receiver} ({len(text)} chars)")
     try:
         if action == "send":
             return _send(params)
@@ -323,16 +388,18 @@ def _verify(params: dict, result, before):
 TOOL = {
     "name": "send_message",
     "description": (
-        "Writes to a person in a desktop messenger (Slack, Discord, Telegram, Teams, WhatsApp…), "
+        "Writes to a person in a desktop messenger (Slack, Telegram, Viber, Discord, Teams…), "
         "in two steps the user controls. action='draft' (the default): opens the conversation "
         "with `receiver` and types `message_text` into its message box WITHOUT sending, so the "
         "user can read and change it. action='send' — only when the user says to send it: sends "
         "what is in the box now, after asking them ([CONFIRM_SEND]); once they say yes, call "
         "again with action='send' and confirmed=true. action='open': just opens that person's "
-        "conversation ('find Jane in Slack', 'open my chat with…'). `receiver` is the name as the "
-        "app shows it — usually in Latin letters ('Jane Doe'). Write `message_text` in "
-        "the user's own language, exactly what they asked to say. Never say a message was sent "
-        "unless the result says so."
+        "conversation ('find Jane in Slack', 'open my chat with…'). `receiver` is the person as "
+        "the user named them, in the nominative ('Оля', 'Jane Doe') — their contacts (the "
+        "contacts tool) translate it to the app's name; Viber needs the person's phone number "
+        "in the contacts. When the result asks which person is meant, ask the user. Write "
+        "`message_text` in the user's own language, exactly what they asked to say. Never say "
+        "a message was sent unless the result says so."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -351,7 +418,7 @@ TOOL = {
             },
             "platform": {
                 "type": "STRING",
-                "description": "Slack, Discord, Telegram, Teams, WhatsApp… (default Slack)"
+                "description": "Slack, Telegram, Viber, Discord, Teams… (default Slack)"
             },
             "confirmed": {
                 "type": "BOOLEAN",

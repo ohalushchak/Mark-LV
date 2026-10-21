@@ -66,10 +66,14 @@ Status: ✅ built and tried live · 🟡 built, partly tried live · ⬜ planned
 | C-2 | `close_app` closes the named app, never the focused window, and reports admin rights or a save prompt instead of claiming success. Undo reopens it (ADR-008). | ✅ |
 | C-3 | Every state-changing tool ends its result with `[VERIFIED]`, `[UNVERIFIED]` or `[FAILED]`, based on a before/after check (ADR-013). | ✅ |
 | C-4 | Typing is exact under any keyboard layout (ADR-015). | ✅ |
-| C-5 | Messages are drafted in the messenger and left unsent. Sending happens only after "send this message" and a yes by voice or HUD (ADR-014). | ✅ Slack; Discord, Telegram, Teams and WhatsApp untried |
+| C-5 | Messages are drafted in the messenger and left unsent. Sending happens only after "send this message" and a yes by voice or HUD (ADR-014). The person is found through the user's contacts (C-9) and must be the one whose chat opened (ADR-025). | ✅ Slack, Telegram, Viber; Discord, Teams, WhatsApp untried |
 | C-6 | `computer_use` runs a multi-step task with re-locating before every click. It pauses before risky buttons, and moving the mouse stops it. | 🟡 the risky-step pause not yet seen live |
 | C-7 | Emptying the Recycle Bin is a dedicated action behind HUD CONFIRM (ADR-016). | 🟡 not yet seen live |
 | C-8 | `screen_process` with `monitor='all'`: one image per monitor in the same turn. | ⬜ |
+| C-9 | A contact list of the user's own (`config/contacts.json`, git-ignored): who a spoken name means, their name in each app and their phone number. Two people under one name is a question, never a guess; numbers reach the model as their last 4 digits; emergency numbers are never stored, written to or dialled. Changes by voice can be undone (ADR-025). | ✅ |
+| C-10 | Calls in Telegram, Viber, Slack (huddle) and to phone numbers through Phone Link. Starting a call and accepting an incoming one happen only after the user's yes; declining and hanging up happen at once. While a call is on the assistant sleeps and announces nothing (ADR-026). | 🟡 Viber and Telegram live (dial, decline, accept, hang up); Slack, Phone Link and Telegram incoming untried |
+| C-11 | Read what people wrote, from the messenger itself: Viber's open chat with each message marked theirs or the user's, Telegram's latest message per chat or its unread chats, without marking anything read (ADR-027). | ✅ Viber, Telegram |
+| C-12 | New messages from the chats the user chose are announced by voice, read from Windows notifications (Slack; the phone's messengers through Phone Link) (ADR-027). | 🟡 built; not yet heard live |
 
 ### 6.3 Coding and other AIs
 
@@ -117,7 +121,7 @@ Status: ✅ built and tried live · 🟡 built, partly tried live · ⬜ planned
 | Cost | No new subscription. The Gemini free tier plus the owner's existing Claude Code and Codex plans. No GPU required. |
 | Footprint | Optional features import nothing until enabled. The 1.24 GB embedding model is the one accepted heavy dependency, and it can be switched off. |
 | Platforms | Windows 11 is supported and tested live. macOS and Linux code paths branch on `platform.system()` and must keep working or explain themselves by voice. |
-| Quality | `python -m pytest tests` passes headless (505 passed, 1 skipped on 2026-10-21). Every feature is tried live by voice before merge (ADR-003). |
+| Quality | `python -m pytest tests` passes headless (550 passed, 1 skipped on 2026-10-21). Every feature is tried live by voice before merge (ADR-003). |
 
 ## 8. Success measures
 

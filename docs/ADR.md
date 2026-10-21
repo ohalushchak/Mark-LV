@@ -32,6 +32,9 @@ Status values: **Accepted** (in the code), **Parked** (researched, not built), *
 | [022](#adr-022-a-fact-the-user-did-not-say-waits-for-confirmation) | A fact the user did not say waits for confirmation | 2026-10-21 | Accepted |
 | [023](#adr-023-conversations-are-kept-as-summaries-not-transcripts) | Conversations are kept as summaries, not transcripts | 2026-10-21 | Accepted |
 | [024](#adr-024-the-obsidian-vault-is-indexed-read-and-edited-with-undo) | The Obsidian vault is indexed, read and edited with undo | 2026-10-21 | Accepted |
+| [025](#adr-025-messengers-are-driven-by-what-each-app-shows-ui-automation) | Messengers are driven by what each app shows UI Automation | 2026-10-21 | Accepted |
+| [026](#adr-026-calls-start-only-on-the-users-yes-and-are-seen-locally) | Calls start only on the user's yes and are seen locally | 2026-10-21 | Accepted |
+| [027](#adr-027-messages-are-read-from-the-apps-and-from-windows-notifications) | Messages are read from the apps and from Windows notifications | 2026-10-21 | Accepted |
 
 ---
 
@@ -391,3 +394,46 @@ This is the owner's rule, word for word, in the build log.
 - **Exact names:** edits go only to an exactly named note (compared without spaces or case); a vague name is refused with candidates.
 
 **Mixed from.** BlackStarG5 (document index), aonizai (documents and chunks), Nathan123y (edit with undo).
+
+## ADR-025: Messengers are driven by what each app shows UI Automation
+
+- **Date:** 2026-10-21 · **Status:** Accepted
+
+**Context.** Every fork but one sends blindly (Win, app name, Ctrl+F, paste, Enter, "Message sent"). borgelevisberg17's `social_control` has the right rules but looks for a conversation header that neither Telegram nor Viber exposes. Each app was measured on the owner's PC.
+
+**Decision.**
+- **Rules (borgelevisberg17):** one window of the app's own process; a search result only when its name is exactly the person's, two of them a question; the opened conversation must prove it is theirs before anything is typed; sent means the message is in the chat and the box is empty.
+- **Telegram:** its search box takes the focus from UIA; results are ListItems with Type/Name cells (a person wins over a channel or bot of the same name); the open chat is named only in the window title.
+- **Viber:** names nothing to UIA, so a chat opens by the person's phone number (`viber://chat?number=`), and "it opened" means the bubbles on screen changed. When they did not (that chat was already open), the bubbles remembered from the last confirmed open, or one vision look at the header, decide.
+- **Contacts:** `config/contacts.json` ties a spoken name to each app's name and the phone number (Nathan123y's refuse-rather-than-guess lookup, Kira's margin over the runner-up, masked numbers, emergency numbers refused).
+- **Gate:** ADR-014 for every app. A confirmed=true call that nobody asked about is treated as the first call and asks (seen live: the model passed confirmed=true at once and twice told the user the screen showed no confirmation).
+
+**Rejected.** Kira's WA-JS injection into WhatsApp Web (ban risk); JAlmuscaty's vision-picked click points; vision as the first way to find a chat.
+
+## ADR-026: Calls start only on the user's yes and are seen locally
+
+- **Date:** 2026-10-21 · **Status:** Accepted
+
+**Context.** The owner's rule: the assistant opens the contact, and the call starts only after their confirmation; declining an incoming call needs none.
+
+**Decision.**
+- **Dial:** Telegram's "Call", then "Start Call" or "Start Video" in its call window; Viber's call button, then "Безплатний дзвінок Viber" in the menu it opens, never Viber Out (paid); Slack's Ctrl+Shift+H (pressed to hang up only while in a huddle, because it also starts one); Phone Link through `tel:`.
+- **In a call** when any of these holds: Windows' microphone privacy record says the app holds the mic; the app has an active audio capture session on any microphone (Viber recorded from the webcam's mic and never touched the privacy record); a call window shows a hang-up control.
+- **Viber's call windows** show UIA nothing: buttons are found by colour in a capture of that window only (a red and a green disc mean ringing; in a call, the white disc with a red handset, because the muted mic and camera are red pills).
+- **Hold:** while a call is on, the assistant falls asleep, streams nothing and announces nothing (`main._run_call_watch`).
+- **COM** for call detection runs on one thread that collects its own garbage, and interfaces come from `QueryInterface`, not pycaw's `cast`: both crashed the process with an access violation (a double release).
+
+**Rejected.** JAlmuscaty's auto-decline loop with screenshots to Gemini; rilzisheree's escalation calls without a yes; Nathan123y's Twilio line (a business line with costs).
+
+## ADR-027: Messages are read from the apps and from Windows notifications
+
+- **Date:** 2026-10-21 · **Status:** Accepted
+
+**Context.** Without a reading tool the model looked at the screen and called the owner's own message a received one.
+
+**Decision.**
+- **Reading on request (`read_messages`):** Viber's open chat, each bubble theirs (left) or the user's (right); Telegram's chat list cells (last message, sender, unread count, Delivery "Received" for incoming), so nothing is opened or marked read.
+- **New messages (`watch_messages`, `core/message_watch.py`):** read-only from `wpndatabase.db`, the store of every Windows toast. Slack writes there, and Phone Link writes the phone's Viber, Telegram, WhatsApp and SMS; Telegram and Viber on the PC do not. Only chats the owner named are announced, one item per chat, when the room is quiet, never during a call.
+- **Message text** reaches the model as quoted data, never as instructions; nothing is answered without the send gate.
+
+**Rejected.** Nathan123y's `chat_takeover` (replies in the owner's style without a yes per message); reading the screen by vision.
