@@ -6,6 +6,7 @@ _Last updated: 2026-10-21_
 
 ## Done in this fork
 
+- `docs/PRD.md` and `docs/ADR.md`: the product requirements (with built / partly tried / planned status) and the architecture decisions with their reasons and rejected alternatives, linked from `CLAUDE.md`.
 - Memory in SQLite with search by meaning, mixed from forks (tests in `tests/test_memory_store.py`, `test_memory_search.py`, `test_memory_trust.py`, `test_notes_index.py`, `test_notes_edit.py`, `test_memory_panel.py`). Tried live on Windows in five sessions.
   - **Store:** `memory/memory.db` with facts, history, suggestions, session summaries, the notes index and vectors (TeddyDARKVADOR's schema ideas with INTEGER rowids; maseko-lucky-9's migration recipe; bfrpaulondev's provenance). `long_term.json` migrated and kept as `.bak`; monitors moved to DB state.
   - **Search:** FTS5 + EmbeddingGemma vectors fused by rank (Giljacob67's fastembed index, re-done for Cyrillic and off the event loop; reyesservice34-hue's quoted FTS query). Facts are stored in the user's own words and language; a Ukrainian question finds an English fact and back.
