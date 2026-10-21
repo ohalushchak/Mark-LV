@@ -61,8 +61,9 @@ IMG_MAX = (1600, 1000)
 _RISKY_RE = re.compile(
     r"(delete|remove|erase|uninstall|format|reset|wipe|discard|pay|purchase|buy|order|checkout|"
     r"subscribe|transfer|send|submit|post|publish|sign ?out|log ?out|password|"
+    r"\bcall\b|video call|"
     r"видал|вилуч|стерти|оплат|купи|придба|замов|переказ|надісл|відправ|опублік|вийти|пароль|"
-    r"скину|форматув)", re.IGNORECASE)
+    r"дзвін|подзвон|звон|скину|форматув)", re.IGNORECASE)
 
 
 @dataclass

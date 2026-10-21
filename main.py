@@ -88,6 +88,7 @@ from core                      import self_repair
 from core                      import tool_args
 from core.action_loader        import NO_RESULT
 from core.agent_relay          import Relay as AgentRelay
+from core                      import calls as call_state
 from core                      import audio_devices
 from core.action_loader        import discover_actions
 from core.barge_in             import BargeIn
@@ -640,6 +641,9 @@ class JarvisLive:
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
+        self._call_watch          = call_state.Watch()
+        self._call_hold           = False   # a messenger / Phone Link call is on: asleep, silent
+        self._call_woke           = False   # was awake when the call began
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
@@ -1967,6 +1971,10 @@ class JarvisLive:
             if self._wake_enabled and not self._awake:
                 self._mic_asleep(indata)
                 return
+            # In a call with no wake word: asleep means deaf — the call's
+            # words are not the assistant's to hear (_run_call_watch).
+            if self._call_hold and not self._awake:
+                return
             # Just woken by voice: what was said after the wake phrase, so a
             # command spoken in the same breath arrives whole.
             wake_replay = self._take_wake_replay() if self._wake_ring else []
@@ -2751,6 +2759,7 @@ class JarvisLive:
             with self._speaking_lock:
                 speaking = self._is_speaking
             if (speaking or self._generation_open() or self._tool_turn_open
+                    or self._call_hold
                     or self._vision_busy or self._barge_hold is not None
                     or (self._ptt_enabled and self._ptt_held)
                     or time.monotonic() - self._last_user_speech < 4.0):
@@ -2797,6 +2806,67 @@ class JarvisLive:
                 continue
             for text, note, key in due:
                 print(f"[Relay] 📥 {note}")
+                announcer.say(text, note=note, key=key, max_age=600)
+
+    async def _run_call_watch(self) -> None:
+        """Calls in the messengers and Phone Link (core/calls.py): a ringing
+        call is announced (accepting asks the user, declining does not —
+        actions/call.py), and while a call is on the assistant holds still:
+        it falls asleep, streams nothing and announces nothing, so neither the
+        person on the line nor the room hears it. The wake phrase still works,
+        to hang up by voice. Windows only."""
+        if _platform.system() != "Windows":
+            return
+        while True:
+            await asyncio.sleep(1.5)
+            try:
+                events = await asyncio.to_thread(self._call_watch.check)
+            except Exception as e:
+                print(f"[Calls] ⚠️ {e}")
+                continue
+            for kind, what in events:
+                if kind == "ring":
+                    app = call_state.LABEL.get(what.app, what.app)
+                    who = what.who or "Someone"
+                    print(f"[Calls] 📞 {app} is ringing: {who}")
+                    announcer.say(f"{who} is calling on {app}. The user can say to accept or "
+                                  "decline it.", note=f"Call from {who} ({app})",
+                                  key="call-ring", max_age=45)
+                elif kind == "call" and not self._call_hold:
+                    print(f"[Calls] 🔕 {what} call on — holding still")
+                    self._call_hold = True
+                    self._call_woke = self._awake
+                    self.sleep("a call is on")
+                elif kind == "ended" and self._call_hold and not self._call_watch.in_call():
+                    print(f"[Calls] 🔔 {what} call ended")
+                    self._call_hold = False
+                    if not self._wake_enabled and self._call_woke:
+                        self.wake("the call ended")
+
+    async def _run_message_watch(self) -> None:
+        """New messages from the chats the user chose (watch_messages), read
+        from the Windows notification database (core/message_watch.py) and
+        handed to the announcer — which speaks when the room is quiet, holds
+        during a call, and keeps one item per chat, the newest. Windows only."""
+        if _platform.system() != "Windows":
+            return
+        from core import message_watch
+        from memory.config_manager import get_message_watch
+        watch = await asyncio.to_thread(message_watch.Watch)
+        while True:
+            await asyncio.sleep(3.0)
+            try:
+                entries = get_message_watch()
+                found = await asyncio.to_thread(watch.check, entries)
+            except Exception as e:
+                print(f"[Messages] ⚠️ {e}")
+                continue
+            per_chat: dict[str, list] = {}
+            for entry, m in found:
+                per_chat.setdefault(entry, []).append(m)
+            for entry, ms in per_chat.items():
+                text, note, key = message_watch.say(entry, ms)
+                print(f"[Messages] 📨 {note}")
                 announcer.say(text, note=note, key=key, max_age=600)
 
     def _on_announcement(self, item) -> None:
@@ -3090,6 +3160,8 @@ class JarvisLive:
                     tg.create_task(self._run_sleep_watch())
                     tg.create_task(self._run_announcer())
                     tg.create_task(self._run_agent_relay())
+                    tg.create_task(self._run_call_watch())
+                    tg.create_task(self._run_message_watch())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 

@@ -52,22 +52,25 @@ _pending: Optional[_Pending] = None
 _done: Optional[tuple] = None     # (key, result, at) — sent from the HUD button
 
 
-def ask(what: str, key: tuple, run: Callable[[], str], tool: str) -> str:
-    """Register a send and return what the model must do instead of sending."""
+def ask(what: str, key: tuple, run: Callable[[], str], tool: str, verb: str = "send") -> str:
+    """Register a send and return what the model must do instead of sending.
+    `verb`: what is asked about — "send" a message, "call" someone, "accept"
+    a call (the same rule covers them: the user's word, 2026-10-21)."""
     global _pending, _done
     p = _Pending(what=what, key=key, run=run, asked_at=time.monotonic())
     with _lock:
         _pending, _done = p, None
     button = ""
     if not confirm.pending_title():
-        confirm.request(key="send", title=f"Send {what}", detail="Nothing is sent until you confirm.",
-                        run=lambda: _from_button(p))
+        confirm.request(key="send", title=f"{verb.capitalize()} {what}",
+                        detail="Nothing happens until you confirm.", run=lambda: _from_button(p))
         button = " They can also press CONFIRM on the HUD."
-    return (f"[CONFIRM_SEND] Nothing was sent. Ask the user now, in ONE short sentence in "
-            f"their language, whether to send {what}.{button} Then END YOUR TURN — their "
+    nothing = "Nothing was sent" if verb == "send" else "Nothing was done yet"
+    return (f"[CONFIRM_SEND] {nothing}. Ask the user now, in ONE short sentence in "
+            f"their language, whether to {verb} {what}.{button} Then END YOUR TURN — their "
             f"spoken answer must come first. If they agree, call {tool} again with the "
             f"same arguments and confirmed=true. If they decline, drop it and say nothing "
-            f"was sent.")
+            f"was done.")
 
 
 def _from_button(p: _Pending) -> str:
@@ -106,6 +109,19 @@ def approve(key: tuple) -> Optional[str]:
         _pending = None
     confirm.dismiss("send")
     return None
+
+
+def waiting(key: tuple) -> bool:
+    """Was the user asked about exactly this (or did the HUD button already
+    handle it)? A confirmed=true call for anything else is treated as the
+    first call, so it asks instead of refusing. Seen live (2026-10-21): on
+    "send it" the model passed confirmed=true straight away, got [NOT_SENT],
+    and told the user twice that the screen showed no confirmation."""
+    now = time.monotonic()
+    with _lock:
+        p, d = _pending, _done
+    return ((p is not None and p.key == key and now - p.asked_at <= ASK_TTL)
+            or (d is not None and d[0] == key and now - d[2] < ASK_TTL))
 
 
 def pending() -> Optional[str]:

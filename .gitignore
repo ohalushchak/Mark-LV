@@ -30,6 +30,8 @@ memory/*.db
 memory/*.db-*
 # The old memory file, kept after it was moved into memory.db
 memory/*.bak
+# Your contacts: names and phone numbers of the people you write to and call
+config/contacts.json
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/

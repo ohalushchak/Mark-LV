@@ -625,7 +625,12 @@ _CHAT_APPS = {"slack", "teams", "ms-teams", "msteams", "whatsapp", "whatsapp.roo
 _COMPOSE_RE = re.compile(r"(message|повідомлен|сообщен|написати|напишіть|reply|"
                          r"відповісти|chat|чат|comment|коментар|compose)", re.IGNORECASE)
 _SEND_KEYS = {"enter", "return", "ctrl+enter", "ctrl+return", "control+enter"}
-_SEND_LABEL_RE = re.compile(r"^\s*(send|надіслати|відправити|отправить|submit)\b", re.IGNORECASE)
+# A call button dials as surely as Send sends (the user's rule, 2026-10-21).
+_SEND_LABEL_RE = re.compile(r"^\s*(send|надіслати|відправити|отправить|submit|"
+                            r"(start |voice |video |audio )?call|"
+                            r"подзвонити|дзвінок|відеодзвінок|позвонить|звонок|видеозвонок)\b",
+                            re.IGNORECASE)
+_CALL_LABEL_RE = re.compile(r"(\bcall\b|дзвін|подзвон|звон)", re.IGNORECASE)
 
 
 def _compose_target():
@@ -671,7 +676,7 @@ def send_guard(params: dict, keys: str, do, tool: str | None = None, to: str = "
         return None
     from core import send_gate
     key = ("keys", c["hwnd"], c["field"], c["text"])
-    if params.get("confirmed"):
+    if params.get("confirmed") and send_gate.waiting(key):
         return send_gate.approve(key)
 
     def from_button() -> str:
@@ -699,7 +704,7 @@ def _screen_click(params: dict) -> str:
         from core import send_gate
         fg = ds.foreground() or {}
         key = ("click", fg.get("hwnd"), found.label, found.x, found.y)
-        if params.get("confirmed"):
+        if params.get("confirmed") and send_gate.waiting(key):
             refused = send_gate.approve(key)
             if refused:
                 return refused
@@ -710,6 +715,10 @@ def _screen_click(params: dict) -> str:
                 _click(x, y)
                 return f"Clicked '{found.label}'."
             app = fg.get("exe") or "the app"
+            if _CALL_LABEL_RE.search(found.label) or _CALL_LABEL_RE.search(desc):
+                return send_gate.ask(f"'{found.label}' in {app} — it starts a call", key, from_button,
+                                     "computer_control (screen_click, the same description)",
+                                     verb="press")
             return send_gate.ask(f"by clicking '{found.label}' in {app}", key, from_button,
                                  "computer_control (screen_click, the same description)")
     problem = _place_pointer(found.x, found.y)
