@@ -12,6 +12,7 @@ _Last updated: 2026-10-21_
   - **Calls:** the `call` tool (start, accept, decline, end, status) and `core/calls.py` (mic privacy record, audio capture sessions, call windows; Viber's buttons found by colour). Live in Viber: dial ("Безплатний дзвінок Viber"), decline, accept after the yes, hang up; in Telegram: dial ("Start Call"), hang up. While a call is on, `main._run_call_watch` keeps the assistant asleep and silent — seen live.
   - **Reading:** `read_messages` (Viber's open chat marked theirs / the user's; Telegram's last message per chat or its unread chats, nothing marked read) — live in both.
   - **New messages:** `watch_messages` + `core/message_watch.py` read Windows' notification database (Slack; the phone's messengers through Phone Link) and announce chats the user named (`main._run_message_watch`).
+  - **Viber without a number:** shops and groups open through Viber's own search (the first result) and are confirmed by a look at the chat header — a second look when the first could not read it; a call re-checks that the same chat is still on screen. Live: Dnipro-M read.
   - **Fixed on the way:** call / Send-like buttons clicked by `screen_click` or computer use now go through the send gate; the console log no longer prints message text; a COM double release (pycaw's `cast`) that killed the process.
 - `docs/PRD.md` and `docs/ADR.md`: the product requirements (with built / partly tried / planned status) and the architecture decisions with their reasons and rejected alternatives, linked from `CLAUDE.md`.
 - Memory in SQLite with search by meaning, mixed from forks (tests in `tests/test_memory_store.py`, `test_memory_search.py`, `test_memory_trust.py`, `test_notes_index.py`, `test_notes_edit.py`, `test_memory_panel.py`). Tried live on Windows in five sessions.
@@ -67,8 +68,7 @@ Upstream roadmap "LVI+" (interrupt by voice is done):
 Fork backlog (deferred by the user, 2026-10-14):
 
 - [ ] Alternatives to Gemini Live (parked 2026-10-16): a Claude rung in `core/gemini.py`, then local STT/TTS with Claude Code as the brain behind a mode switch. Research, measurements and plan: `docs/research/gemini-alternatives/README.md`.
-- [ ] Messengers stage 5 (chosen by the user): the assistant speaks into a call — rilzisheree's `messenger_audio_bridge` (VB-CABLE in, loopback out), its own Live session with an AI disclosure; echo and Phone Link audio still to solve.
-- [ ] Viber chats without a phone number (shops, groups): open through Viber's search and confirm the header by vision.
+- [ ] Messengers stage 5 (chosen by the user): the assistant speaks into a call — rilzisheree's `messenger_audio_bridge` (VB-CABLE in, loopback out), its own Live session with an AI disclosure; echo and Phone Link audio still to solve. Waiting for the user to install VB-CABLE (not on this PC; only Oculus's virtual device is).
 - [ ] `screen_process` with `monitor='all'`: each monitor as its own image in the same turn (each compressed to 1280×720), never one stitched 7280-px-wide frame. Choosing one monitor is done.
 
 ## Known issues
@@ -99,7 +99,7 @@ Fork backlog (deferred by the user, 2026-10-14):
 - After "Server reports interruption" the model sometimes repeats the same tool call: in Slack a `type` ran twice. Not guarded — a repeat cannot yet be told from a new request ("louder" said twice).
 - Vision calls (screen_click by sight, computer use) take 10–60 s on this key: 3.6-flash and 3.5-flash run out of quota and flash-latest times out, so the ladder falls to the Live rung; each computer-use run spends several calls.
 - Verification, finding by UIA name, the send gate's message-box detection, conversation jumps, calls and computer use work on Windows only; elsewhere the verdict is UNVERIFIED and `send_message` refuses to open a conversation. Slack (Ctrl+K), Telegram and Viber are tried live; Discord shares Slack's shortcut, Teams / WhatsApp fall back to Ctrl+F + Enter and are untried.
-- Viber: a chat opens only by phone number, so shops and groups cannot be written to or read; the first open after a start may take a vision look at the header (up to a minute on this key) when that chat was already on screen. `read_messages` sees only the bubbles on screen; Telegram shows only each chat's latest message.
+- Viber: a chat without a number (shop, group) is found by Viber's search and confirmed by a vision look at its header (10–60 s on this key), and only the first search result is tried; a chat with a number may also need that look on the first open after a start when it was already on screen. `read_messages` sees only the bubbles on screen; Telegram shows only each chat's latest message.
 - Viber's call buttons are found by colour (its call windows show UIA nothing), so a Viber redesign can break decline / accept / hang up there; the `[Calls]` console lines describe what a call window offers.
 - Calls not yet tried live: Slack huddles, Phone Link (`tel:` is not set as the default handler on this PC), an incoming Telegram call. Video works in Telegram and Viber only.
 - With the wake word off, the assistant cannot be woken by voice during a call (the mic stays closed); typed text wakes it, and then it hears the call until it ends.

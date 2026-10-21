@@ -161,6 +161,7 @@ def test_no_call_is_prepared_when_the_chat_did_not_open(monkeypatch):
 
 def test_the_hud_button_dials_too(monkeypatch):
     dialed = _messenger(monkeypatch)
+    cb.save([cb.Contact("Остап", [], "+380671112233")])
     monkeypatch.setattr(calls, "active", lambda wins=None: [])
     ca.call({"receiver": "Остап", "platform": "Viber", "video": True})
     assert confirm._pending.run().startswith("I pressed video call") and dialed == [True]

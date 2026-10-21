@@ -162,13 +162,13 @@ def open_conversation(platform: str, receiver: str) -> tuple[bool, str]:
     if why:
         return False, why
     if app == "viber":
-        # Viber shows UIA no names at all: only the number opens the right chat
-        # for certain (actions/_messengers.py).
+        # Viber shows UIA no names at all: the number opens the right chat for
+        # certain (actions/_messengers.py). Without one (a shop, a group) the
+        # chat is found by Viber's search and confirmed by its header.
         from core import contacts as cb
-        if not cb.international(phone):
-            return False, (f"Viber chats are opened by phone number, and there is no number with "
-                           f"a country code for '{receiver}'. Add it: contacts action='add' with "
-                           "phone (+380…)")
+        if phone and not cb.international(phone):
+            return False, (f"Viber chats are opened by phone number, and '{receiver}' has one "
+                           "without a country code. Fix it: contacts action='add' with phone (+380…)")
     why = _bring_app(app)
     if why:
         return False, why
@@ -191,6 +191,8 @@ def open_conversation(platform: str, receiver: str) -> tuple[bool, str]:
         from core import contacts as cb
         c = cb.resolve(receiver).contact
         names = [name, *([c.name, *c.aliases] if c else [])]
+        if not phone:
+            return _messengers.viber_open_by_name(hwnd, name, names)
         return _messengers.viber_open(hwnd, phone, name, names)
     receiver = name
     if _names_receiver(receiver):

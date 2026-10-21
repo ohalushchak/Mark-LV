@@ -207,3 +207,58 @@ def test_telegram_lines_say_who_wrote_last():
     assert "from Olya: «Добре»" in rm._tg_line(them) and "1 new message" in rm._tg_line(them)
     assert "from you (seen)" in rm._tg_line(mine)
     assert "(group)" in rm._tg_line(group) and "from Mom" in rm._tg_line(group) and "muted" in rm._tg_line(group)
+
+
+def test_a_viber_chat_without_a_number_goes_by_name(monkeypatch):
+    """A shop or a group has no number: Viber's search, then the header."""
+    monkeypatch.setattr(sm, "_OS", "Windows")
+    monkeypatch.setattr(sm, "_bring_app", lambda app: "")
+    monkeypatch.setattr(ds, "foreground", lambda: {"hwnd": 7, "exe": "viber", "title": "Rakuten Viber"})
+    went = []
+    monkeypatch.setattr(mg, "viber_open_by_name", lambda h, label, names: (went.append(label), (True, "open"))[1])
+    monkeypatch.setattr(mg, "viber_open", lambda *a: pytest.fail("no number to open by"))
+    assert sm.open_conversation("Viber", "Dnipro-M") == (True, "open") and went == ["Dnipro-M"]
+
+
+class _Box:
+    def SetFocus(self):
+        pass
+
+
+def _viber_search(monkeypatch, states, header_yes):
+    """Viber's search box, one unnamed result, and the chat states in turn."""
+    class El:
+        def __init__(self, cls, rect):
+            self.CurrentClassName, self.rect, self.CurrentIsOffscreen = cls, rect, False
+
+        def SetFocus(self):
+            pass
+    search = El("TextFieldItem_QMLTYPE_236", (198, 153, 370, 181))
+    result = El("ListViewDelegateLoader_QMLTYPE_395", (118, 294, 418, 1237))
+    coll = lambda xs: type("C", (), {"Length": len(xs), "GetElement": lambda self, i: xs[i]})()
+    root = type("R", (), {"FindFirst": lambda self, s, c: search,
+                          "FindAll": lambda self, s, c: coll([result])})()
+    monkeypatch.setattr(mg, "_iuia", lambda: type("I", (), {
+        "ElementFromHandle": staticmethod(lambda h: root),
+        "CreatePropertyCondition": staticmethod(lambda p, v: None)}))
+    monkeypatch.setattr(mg, "_rect", lambda el: el.rect)
+    seq = iter(states)
+    last = {"s": states[0]}
+    monkeypatch.setattr(mg, "_viber_chat", lambda h: last.__setitem__("s", next(seq, last["s"])) or last["s"])
+    looks = []
+    monkeypatch.setattr(mg, "_viber_header_verdict", lambda h, n, p: looks.append(n) or ("yes" if header_yes else "no"))
+    monkeypatch.setattr(mg, "_viber_seen", {})
+    return looks
+
+
+def test_viber_by_name_types_only_after_the_header_says_yes(monkeypatch, _quiet):
+    looks = _viber_search(monkeypatch, [(["old"], _Box()), (["Dnipro news"], _Box())], header_yes=False)
+    ok, what = mg.viber_open_by_name(7, "Dnipro-M", ["Dnipro-M"])
+    assert not ok and "nothing was typed" in what and looks == [["Dnipro-M"]]
+    assert ("click", 268, 324) in _quiet                      # the first result
+    looks = _viber_search(monkeypatch, [(["old"], _Box()), (["Dnipro news"], _Box())], header_yes=True)
+    ok, what = mg.viber_open_by_name(7, "Dnipro-M", ["Dnipro-M"])
+    assert ok and "header checked" in what
+    assert mg.viber_still_open(7, "Dnipro-M")                 # the same bubbles: no second look
+    ok, what = mg.viber_open_by_name(7, "Dnipro-M", ["Dnipro-M"])
+    assert ok and "already open" in what and len(looks) == 1
