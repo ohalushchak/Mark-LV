@@ -2,10 +2,16 @@
 
 What works, what is left, and known issues. Upstream releases up to Mark LV are described in `readme.md`; this file tracks the fork from there.
 
-_Last updated: 2026-10-16_
+_Last updated: 2026-10-21_
 
 ## Done in this fork
 
+- Memory in SQLite with search by meaning, mixed from forks (tests in `tests/test_memory_store.py`, `test_memory_search.py`, `test_memory_trust.py`, `test_notes_index.py`, `test_notes_edit.py`, `test_memory_panel.py`). Tried live on Windows in five sessions.
+  - **Store:** `memory/memory.db` with facts, history, suggestions, session summaries, the notes index and vectors (TeddyDARKVADOR's schema ideas with INTEGER rowids; maseko-lucky-9's migration recipe; bfrpaulondev's provenance). `long_term.json` migrated and kept as `.bak`; monitors moved to DB state.
+  - **Search:** FTS5 + EmbeddingGemma vectors fused by rank (Giljacob67's fastembed index, re-done for Cyrillic and off the event loop; reyesservice34-hue's quoted FTS query). Facts are stored in the user's own words and language; a Ukrainian question finds an English fact and back.
+  - **Trust:** a model-written fact is checked against the user's recent words (not questions), with a 3 s recheck for a lagging transcript; unbacked facts wait on the MEMORY panel (✓ / ✕). `forget_memory` deletes facts about a subject and names them; undo restores.
+  - **Conversations:** summaries kept for good (2–4 sentences, secrets redacted), searched by `recall_conversation`; the briefing still mentions the last one once. Full transcripts are not stored (the user's choice).
+  - **Notes:** the Obsidian vault (auto-detected or chosen on the panel) indexed incrementally; `notes` searches, reads, opens and edits — append (under a heading's own text), create, remove a line, replace — every edit undoable (BlackStarG5's document index without its 2,000-file cap; Nathan123y's edit-with-undo flow).
 - Computer use with verified results, mixed from forks (tests in `tests/test_verify.py`, `test_verified_actions.py`, `test_send_gate.py`, `test_computer_use.py`). Tried live on Windows in eight sessions; `empty_trash` and the computer-use pause before a risky step are not yet seen live.
   - **Verdicts:** `TOOL["snapshot"]` / `TOOL["verify"]` run by the action loader; results end with [VERIFIED] / [UNVERIFIED] / [FAILED] (bfrpaulondev's postconditions, syamsulmuiin's "no evidence = unverified"); a FAILED verdict counts in tool health.
   - **Checked actions:** `open_app` (new window / process, an app already running is brought forward), `computer_control` (pointer, focus, a noise-masked screen sample, the focused field read back), `computer_settings` (volume, mute, brightness, theme, window state on a named window), `file_controller` (the disk read back), `browser_control` (page state before/after, BlackStarG5; the real browser's address bar through UIA).
@@ -44,18 +50,21 @@ _Last updated: 2026-10-16_
 
 Upstream roadmap "LVI+" (interrupt by voice is done):
 
-- [ ] Conversation history
+- [x] Conversation history — as searchable summaries (`recall_conversation`); full transcripts deliberately not kept
 - [ ] Telegram remote
 - [ ] Full file access
 - [ ] Security camera
-- [ ] Obsidian integration
+- [x] Obsidian integration — search, read, open, edit (`notes`)
 
 Fork backlog (deferred by the user, 2026-10-14):
 
+- [ ] Alternatives to Gemini Live (parked 2026-10-16): a Claude rung in `core/gemini.py`, then local STT/TTS with Claude Code as the brain behind a mode switch. Research, measurements and plan: `docs/research/gemini-alternatives/README.md`.
 - [ ] `screen_process` with `monitor='all'`: each monitor as its own image in the same turn (each compressed to 1280×720), never one stitched 7280-px-wide frame. Choosing one monitor is done.
 
 ## Known issues
 
+- Memory: the first index of a vault takes minutes of CPU in the background (207 s for 1,712 chunks); a spoken recall during it waits up to ~1 s for the batch in progress. Floors and the trust thresholds were calibrated on a few dozen phrases; a long-running store may need them re-checked. The model may still save something it read as a "fact" (it did once after a notes search); questions no longer back facts, so such saves now land as suggestions.
+- Notes editing writes only to an exactly named note; a vague name is refused with candidates. Obsidian vault detection is untested on macOS/Linux.
 - `ui.py` reuses names easily: a new `JarvisUI` / `MainWindow` member with an existing name silently replaces the old one (it happened with `show_review` / `_review_sig`). Check with a grep before adding one.
 - Tool health sees a handler's caught error only when it calls `health.failed(why)` or its sentence starts like a failure ("Error…", "Failed…"); most actions still return their errors as plain sentences, so their status stays green.
 - Self-repair restart: the new instance runs on the old one's console, so the shell prompt comes back while JARVIS keeps printing. Restart and rollback are untested on macOS and Linux.

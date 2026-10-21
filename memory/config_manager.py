@@ -654,3 +654,26 @@ def save_agent_settings(**values) -> None:
     cur = dict(cur) if isinstance(cur, dict) else {}
     cur.update(values)
     _save_flag("agents", cur)
+
+
+# ── Memory: search by meaning and the notes vault (memory/) ──────────────────
+
+def get_semantic_memory_enabled() -> bool:
+    """Search memory and notes by meaning with the local embedding model
+    (memory/embedder.py). Off: full-text search only, and the 1.24 GB model is
+    never downloaded."""
+    return bool(load_api_keys().get("semantic_memory", True))
+
+
+def save_semantic_memory_enabled(enabled: bool) -> None:
+    _save_flag("semantic_memory", bool(enabled))
+
+
+def get_notes_vault() -> str:
+    """The notes folder the `notes` tool searches. Empty: the vault Obsidian
+    has open (memory/notes_index.vault_path)."""
+    return str(load_api_keys().get("notes_vault") or "").strip()
+
+
+def save_notes_vault(path: str) -> None:
+    _save_flag("notes_vault", str(path or "").strip())

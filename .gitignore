@@ -26,6 +26,10 @@ config/whatsapp_web/
 # ── Personal data the assistant accumulates about you ─────────────────────────
 memory/long_term.json
 memory/*.db
+# SQLite's write-ahead log and shared memory next to memory.db
+memory/*.db-*
+# The old memory file, kept after it was moved into memory.db
+memory/*.bak
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/
@@ -54,6 +58,8 @@ desktop.ini
 # ── Runtime output ────────────────────────────────────────────────────────────
 # Wake-word models downloaded from the settings panel (tens of MB)
 config/wake_models/
+# The embedding model for memory search (1.24 GB, downloaded on first start)
+config/embed_models/
 *.log
 logs/
 downloads/

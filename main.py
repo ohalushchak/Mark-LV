@@ -51,9 +51,9 @@ from google import genai
 from google.genai import types
 from ui import JarvisUI
 from memory.memory_manager import (
-    load_memory, update_memory, format_memory_for_prompt,
+    load_memory, save_from_model, format_memory_for_prompt,
     save_session_summary, pop_last_session,
-    search_memory, set_trim_notifier,
+    search_memory, set_trim_notifier, start_background as start_memory,
 )
 
 # The file-backed tools (open_app, web_search, browser_control, …) are no longer
@@ -328,7 +328,8 @@ def _describe_limits(has_vision: bool, has_mic: bool) -> str:
         "- You act on this machine only. You cannot reach the user's other "
         "devices, accounts or hardware except through the tools listed above.",
         "- You remember what is in the memory block and what has been said this "
-        "session. Anything else you were told before is gone unless it was saved.",
+        "session. Anything else you were told before is gone unless it was saved; "
+        "earlier conversations survive only as short summaries.",
     ]
     if has_vision:
         out.append(
@@ -502,9 +503,15 @@ TOOL_DECLARATIONS = [
             "Save an important personal fact about the user to long-term memory. "
             "Call this silently whenever the user reveals something worth remembering: "
             "name, age, city, job, preferences, hobbies, relationships, projects, or future plans. "
-            "Do NOT call for: weather, reminders, searches, or one-time commands. "
+            "Do NOT call for: weather, reminders, searches, or one-time commands, "
+            "nor for what you read in the user's notes, files or screen unless they "
+            "ask you to remember it. "
             "Do NOT announce that you are saving — just call it silently. "
-            "Values must be in English regardless of the conversation language."
+            "Never tell the user you will remember something without calling this. "
+            "Save only what the user said about themselves, in the words and the "
+            "language they said it in (names exactly as they say them); something "
+            "you inferred or saw on screen is kept as an unconfirmed suggestion. "
+            "A new value for the same key replaces the old one, which is kept as history."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -520,8 +527,8 @@ TOOL_DECLARATIONS = [
                         "notes — habits, schedule, anything else worth remembering"
                     )
                 },
-                "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
-                "value": {"type": "STRING", "description": "Concise value in English (e.g. Fatih, pizza, older sister)"},
+                "key":   {"type": "STRING", "description": "Short English snake_case key (e.g. name, favorite_food, sister_name)"},
+                "value": {"type": "STRING", "description": "Concise value in the user's own words and language (e.g. Олена, живе у Львові)"},
             },
             "required": ["category", "key", "value"]
         }
@@ -537,7 +544,11 @@ TOOL_DECLARATIONS = [
             "Also call it before saying you do not know something personal, and "
             "when the user asks what you remember about them (leave query empty "
             "for everything). "
-            "This is a local file search: it is instant and costs nothing."
+            "It searches by words and by meaning, in any language — a question in "
+            "Ukrainian finds a fact stored in English and the other way round. "
+            "Local and instant; it costs nothing. "
+            "Not for earlier conversations (recall_conversation) or the user's "
+            "notes (notes)."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -1161,7 +1172,7 @@ class JarvisLive:
         # room. Refusing it used to make the F9 quick prompt look dead: the
         # "I'm asleep" note went to a log that compact mode keeps hidden.
         # wake() is queued first, so it runs on the loop before the send.
-        activity.note_user_input()
+        activity.note_user_input(text)
         if self._wake_enabled and not self._awake:
             self._loop.call_soon_threadsafe(self.wake, "typed command")
         asyncio.run_coroutine_threadsafe(
@@ -1738,8 +1749,19 @@ class JarvisLive:
             key      = args.get("key", "")
             value    = args.get("value", "")
             if key and value:
-                update_memory({category: {key: {"value": value}}})
-                print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+                def _settled(s):
+                    # Called once the save is final: at once when the user's
+                    # words back it, ~3 s later otherwise (their transcript can
+                    # lag the tool call). Only a real suggestion reaches the HUD.
+                    if s.status == "proposed":
+                        self.ui.write_log(f"SYS: Memory suggestion to confirm on the "
+                                          f"MEMORY panel — {s.key.replace('_', ' ')}: {s.value}")
+                # Off the loop: the check against what the user said may embed
+                # a few sentences (memory/trust.py), ~30 ms on the CPU.
+                saved = await asyncio.to_thread(save_from_model, category, key, value,
+                                                None, _settled)
+                print(f"[Memory] 💾 save_memory ({saved.status}): "
+                      f"{saved.category}/{saved.key} = {saved.value}")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -1753,11 +1775,9 @@ class JarvisLive:
         _inline = name in getattr(self, "_inline_names", ())
         try:
             if name == "recall_memory":
-                # Local file search: no network, no second model. Kept out of
-                # the executor deliberately — it is a dictionary scan over a few
-                # hundred short strings, and a thread hop would cost more than
-                # the work itself.
-                result = search_memory(args.get("query", ""), limit=8)
+                # Local search, no network: full text plus one query embedding
+                # (~20 ms on the CPU) — enough to keep it off the event loop.
+                result = await asyncio.to_thread(search_memory, args.get("query", ""), 8)
 
             elif name == "undo":
                 if str(args.get("action", "")).lower().strip() == "list":
@@ -2218,7 +2238,7 @@ class JarvisLive:
                             if txt:
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
-                                activity.note_user_input()
+                                activity.note_user_input(txt)
                                 if self._barge_hold is not None and _has_words(txt):
                                     self._commit_barge_in(f"heard: {txt[:40]!r}")
 
@@ -2643,7 +2663,7 @@ class JarvisLive:
     # ── Session memory ──────────────────────────────────────────────────────────
 
     async def _save_session_summary(self) -> None:
-        """Summarise the current session in 1-2 sentences and save to long_term.json."""
+        """Summarise the current session in a few sentences and keep it in the memory database."""
         log = self._session_log
         if len(log) < 3:          # need at least one exchange to be worth saving
             return
@@ -2654,11 +2674,17 @@ class JarvisLive:
         lang = (lang_entry.get("value", "") if isinstance(lang_entry, dict) else str(lang_entry)).strip()
         lang = lang or "English"
 
-        convo = "\n".join(log[-40:])   # cap at last 40 turns to stay within token budget
+        convo = "\n".join(log[-60:])   # cap at last 60 turns to stay within token budget
+        # Summaries are kept for good and searched later by recall_conversation
+        # ("what did we do with Slack yesterday?"), so they name the concrete
+        # things — apps, people, projects, files — that a later question will
+        # use, not just "the user asked for help".
         prompt = (
-            f"Summarize this conversation in 1-2 sentences in {lang}. "
-            "Focus on what the user accomplished or discussed. "
-            "Output ONLY the summary text, nothing else:\n\n" + convo
+            f"Summarize this conversation in {lang}, in 2-4 sentences. Name the "
+            "concrete topics, apps, people, projects and files involved, what was "
+            "done or decided, and anything left unfinished. Never include "
+            "passwords, codes or keys. Output ONLY the summary text, nothing "
+            "else:\n\n" + convo
         )
         try:
             from core import gemini
@@ -2935,6 +2961,10 @@ class JarvisLive:
             log  = self.ui.write_log,
         )
         set_trim_notifier(self.ui.write_log)
+        # Memory: migrate the old JSON, load the embedding model and start the
+        # indexer (facts, conversations, the notes vault) — all in the
+        # background; recall works on full text until the model is ready.
+        self._loop.run_in_executor(None, start_memory)
         # Self-repair: the HUD shows its review, and an applied change is
         # loaded by restarting this process (core/self_repair.py).
         self_repair.bind(show_review=self.ui.show_repair_review, restart=self.restart_app)

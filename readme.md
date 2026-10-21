@@ -41,6 +41,9 @@ It's not just an assistant — it's an extension of your digital life.
 | 🧩 Self-Describing Skills | Every bundled skill declares its own `TOOL` dict + handler and is auto-discovered at launch — adding one is a single file |
 | 🧠 Recallable Memory | No size limit and nothing silently forgotten — the prompt carries what fits, the rest is looked up on demand from a local search |
 | 👁️ Memory Panel | See every fact JARVIS has stored about you, when it learned it, and delete any of it in one click |
+| 🧭 Memory by Meaning | Facts, past conversations and your notes are found by meaning in any language — "де живе моя сестра?" finds "sister" — with a local model, in SQLite |
+| ✅ Only What You Said | A fact the model saves is checked against your own words; anything it inferred waits on the MEMORY panel for your ✓ |
+| 📓 Obsidian Notes | Search, read, open and edit your vault by voice — add a task to a list, create a note, remove an item — every edit undoable |
 | ↩️ Undo | Take back what the assistant did — files it moved, renamed, created or wrote, and settings it changed |
 | ⚠️ Real Confirmation | Shutdown, restart and WiFi wait for a button **you** press — the model cannot confirm its own irreversible actions |
 | 🎧 Audio Device Picker | Choose the microphone and speakers by name, filtered to the short list your OS shows — and measured, so every entry actually works |
@@ -191,7 +194,9 @@ Storage and prompt budget are now separate problems:
 
 The part that is easy to get wrong: **a model cannot look something up if it doesn't know the thing exists.** So the prompt also carries an **index of the keys** it had no room for. Without it, "who is Ayşe?" gets "I don't know" while `ayse_sister` sits on disk unread. That index interleaves categories rather than sorting by recency — sorted like the core, a memory with forty preferences pushed the one entry the index existed for off the end.
 
-⚙ → **🧠 MEMORY** shows every stored fact, when it was learned, and a ✕ to forget it. Everything stays in `memory/long_term.json` on your machine.
+⚙ → **🧠 MEMORY** shows every stored fact, when it was learned, and a ✕ to forget it.
+
+**In this fork, memory lives in SQLite and is searched by meaning** (`memory/`). Facts, conversation summaries and the Obsidian vault share one database, `memory/memory.db`; each row's full-text entry and vector are written in the same transaction and deleted with it. Search runs both halves — FTS5 for exact words, a local embedding model (EmbeddingGemma through fastembed: CPU, no torch, ~20 ms a query) for meaning — and fuses them, so a Ukrainian question finds a fact saved in English and back. A new value supersedes the old one and keeps it as history; a fact the model saved that your own words do not back is a suggestion on the panel, not something it tells itself it knows. `memory/long_term.json` is migrated on the first start and kept as `long_term.json.bak`.
 
 ### ↩️ Undo — it can take back what it did
 
@@ -354,11 +359,20 @@ Mark LV/
 │   ├── ask_chat_app.py       # Hands a question to the ChatGPT or Claude app via the clipboard
 │   ├── self_check.py         # "What's broken?" — error journal, tool health, probes, test run (read-only)
 │   ├── self_improve.py       # Fix or improve JARVIS's own code through the agent — ask, run, review, restart
+│   ├── notes.py              # The Obsidian vault: search, read, open, append, create, remove, replace (undoable)
+│   ├── recall_conversation.py # What earlier conversations were about, from their saved summaries
+│   ├── forget_memory.py      # "Forget everything about X" — names what went; undo brings it back
 │   └── desktop.py            # Desktop and taskbar control
 ├── memory/
-│   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
+│   ├── memory_manager.py     # Facts (history, suggestions), the prompt block, recall, session summaries
+│   ├── store.py              # memory.db — the SQLite schema, migrations, FTS triggers
+│   ├── search.py             # Hybrid search (full text + vectors), the background indexer
+│   ├── embedder.py           # The local embedding model (EmbeddingGemma via fastembed)
+│   ├── trust.py              # Did the user say what the model is saving?
+│   ├── notes_index.py        # The Obsidian vault index — which vault, chunks, search, read
+│   ├── notes_edit.py         # Voice edits to notes — exact note only, atomic, undoable
 │   ├── config_manager.py     # api_keys.json access — key, OS, name, voice, colour, toggles
-│   └── long_term.json        # Persistent store — created on first run
+│   └── memory.db             # Persistent store — created on first run
 ├── core/
 │   ├── gemini.py             # One place for every one-shot Gemini call — model ladder, timeouts, cooldowns
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup
@@ -419,11 +433,12 @@ Everything stays on your machine. There is no MARK server, no telemetry and no a
 |---|---|---|
 | Gemini API key, plugin credentials | `config/api_keys.json` | **Plaintext.** Anyone with your user account can read it. Treat it like a password file. |
 | Dashboard TLS certificate + private key | `config/certs/` | Generated locally, self-signed, never leaves the machine. |
-| What the assistant remembers about you | `memory/long_term.json` | Delete the file to make it forget everything. |
+| What the assistant remembers about you | `memory/memory.db` (+ `long_term.json.bak` from before the move) | Facts, conversation summaries and the notes index. Delete the files to make it forget everything. |
+| The memory search model | `config/embed_models/` | 1.24 GB, downloaded on first start; never sent anywhere. |
 
 All three are listed in `.gitignore`, so a fork or a pull request cannot leak them by accident. **If you have already committed `config/api_keys.json` anywhere public, revoke that key** at [aistudio.google.com](https://aistudio.google.com/app/apikey) and generate a new one — removing the file in a later commit does not remove it from the history.
 
-Your voice is streamed to Google's Gemini Live API while a session is open, and it stops when you mute or close the app. The coding tools add two more: file contents and command output they read go to Gemini as tool results (files with keys — `api_keys.json`, `.env`, private keys — are never read), and a job you hand to Claude Code or Codex is sent by that CLI to Anthropic or OpenAI under your own account. The agent-session hook writes its events to `~/.jarvis/agent_queue` on your machine only. Finding something on screen by sight and computer use send screenshots of the window or monitor they work on to Gemini. A copy of the console log (`~/.jarvis/logs/`), the error journal (`~/.jarvis/health/`) and self-repair's working copies and history (`~/.jarvis/self_repair/`) stay on your machine too; the journal hides keys, tokens, e-mail addresses and your home folder, and an error is sent to Claude Code or Codex only when you agree to a fix.
+Your voice is streamed to Google's Gemini Live API while a session is open, and it stops when you mute or close the app. The coding tools add two more: file contents and command output they read go to Gemini as tool results (files with keys — `api_keys.json`, `.env`, private keys — are never read), and a job you hand to Claude Code or Codex is sent by that CLI to Anthropic or OpenAI under your own account. The agent-session hook writes its events to `~/.jarvis/agent_queue` on your machine only. Finding something on screen by sight and computer use send screenshots of the window or monitor they work on to Gemini. Memory search runs locally; a fact, a conversation summary or a passage of your notes reaches Gemini only when the assistant looks it up for an answer, and notes are changed only when you ask. A copy of the console log (`~/.jarvis/logs/`), the error journal (`~/.jarvis/health/`) and self-repair's working copies and history (`~/.jarvis/self_repair/`) stay on your machine too; the journal hides keys, tokens, e-mail addresses and your home folder, and an error is sent to Claude Code or Codex only when you agree to a fix.
 
 ---
 
