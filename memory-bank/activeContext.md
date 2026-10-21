@@ -6,7 +6,7 @@ _Last updated: 2026-10-21_
 
 ## Current focus
 
-- Messengers and calls on `feature/messengers-calls` (stages 1–4 of the plan; details in `progress.md` → *Done*, the design in ADR-025 – ADR-027). Tried live with a real contact on Windows:
+- Messengers and calls, merged into `main` (stages 1–4 of the plan; Viber chats without a number added after on `feature/viber-by-name`; details in `progress.md` → *Done*, the design in ADR-025 – ADR-027). Tried live with a real contact on Windows:
   - **Worked:** drafts and sends in Viber after the yes (also when the model passed confirmed=true too early); Telegram drafts; Viber dial, decline, accept, hang up; Telegram dial and hang up; the assistant asleep during a call; `read_messages` in Viber and Telegram.
   - **Fixed after live findings:** Viber's call button opens a menu (the free call is picked, never Viber Out); Telegram asks "Start Call"; Viber's call windows have no UIA (colour); Viber records from the webcam mic (audio capture sessions); a COM double release killed the process; a contact's Telegram name differs from the spoken one.
 
@@ -19,8 +19,8 @@ _Last updated: 2026-10-21_
 
 ## Next steps
 
-- Try live: a message announcement from a watched chat (through Phone Link), a Slack huddle, a Phone Link call, an incoming Telegram call; then merge into `main`.
-- Stage 5 (the user chose it): the assistant speaks into a call — see `progress.md` → *Left to build*.
+- Try live: a message announcement from a watched chat (through Phone Link), a Slack huddle, a Phone Link call, an incoming Telegram call.
+- Stage 5 (the user chose it): the assistant speaks into a call — the user is installing VB-CABLE; see `progress.md` → *Left to build*.
 - Parked by the user: replacing Gemini Live (Claude Code / Codex as the brain, local speech). Everything gathered is in `docs/research/gemini-alternatives/README.md`.
 - Upstream moved to `FatihMakes/Mark-LVI`; compare with this fork when there is time.
 - Carried over: a repeated tool call after "Server reports interruption"; Gemini vision quota (10–60 s); 1008 disconnects (GoAway not answered); `health.failed` in the actions' broad `except` blocks; self-repair restart/rollback not yet seen live.

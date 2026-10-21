@@ -250,6 +250,12 @@ def _start(p: dict) -> str:
                 return _telegram_dial(hwnd, who, names, video)
             if app == "viber":
                 from actions import _messengers as mg
+                if not phone:
+                    # Found by search and its header checked when asked; it
+                    # must still be the chat on screen (no second vision look).
+                    if not mg.viber_still_open(hwnd, who):
+                        return f"the Viber chat '{who}' is no longer the one open"
+                    return _viber_dial(hwnd, video)
                 ok, why = mg.viber_open(hwnd, phone, who, names)
                 return _viber_dial(hwnd, video) if ok else why
             if not sm._names_receiver(who):

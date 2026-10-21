@@ -285,14 +285,108 @@ def _masked(phone: str) -> str:
     return masked(phone)
 
 
+def viber_open_by_name(hwnd: int, label: str, names: list[str]) -> tuple[bool, str]:
+    """Open a Viber chat that has no phone number to go by — a shop, a group,
+    a community — through Viber's own search, and confirm it by one look at
+    the chat header. Viber's results are unnamed blocks (measured live: a
+    'Dnipro-M' search listed eight ListViewDelegateLoader items with no names
+    or values), so the first result is opened and the header must say yes;
+    any other answer types nothing."""
+    from actions import computer_control as cc
+    key = "name:" + " ".join(label.casefold().split())
+    before, box = _viber_chat(hwnd)
+    if box is not None and before and _viber_seen.get(key) == tuple(before):
+        try:
+            box.SetFocus()
+        except Exception:
+            pass
+        return True, f"the Viber chat '{label}' is already open"
+    iuia = _iuia()
+    try:
+        root = iuia.ElementFromHandle(int(hwnd))
+        search = root.FindFirst(4, iuia.CreatePropertyCondition(30003, 50004))   # the first Edit
+        if search is None or not (search.CurrentClassName or "").startswith("TextFieldItem_QMLTYPE"):
+            return False, "Viber's search box is not visible to UI Automation; nothing was opened"
+        search.SetFocus()
+    except Exception as e:
+        return False, f"could not reach Viber's search box ({e}); nothing was opened"
+    time.sleep(0.2)
+    pyautogui.hotkey("ctrl", "a")
+    cc._paste_text(label)
+    first = None
+    s_bottom = _rect(search)[3]
+    deadline = time.monotonic() + 3.0
+    while first is None and time.monotonic() < deadline:
+        time.sleep(0.4)
+        items = []
+        found = root.FindAll(4, iuia.CreatePropertyCondition(30003, 50026))      # Group
+        for i in range(min(found.Length, 600)):
+            el = found.GetElement(i)
+            try:
+                if (el.CurrentClassName or "").startswith("ListViewDelegateLoader") and not el.CurrentIsOffscreen:
+                    l, t, r, b = _rect(el)
+                    if t > s_bottom + 20 and r - l > 100:
+                        items.append((t, l, r))
+            except Exception:
+                continue
+        if items:
+            t, l, r = min(items)
+            first = ((l + r) // 2, t + 30)
+    if first is None:
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.press("delete")
+        pyautogui.press("escape")
+        return False, f"Viber found nothing for '{label}'; nothing was opened"
+    pyautogui.click(*first)
+    after, box = before, None
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        after, box = _viber_chat(hwnd)
+        if box is not None and after != before:
+            break
+    if box is None:
+        return False, f"Viber's first result for '{label}' opened no chat with a message box; nothing was typed"
+    # Seen live: the first look came back without a yes and the same search a
+    # second later was confirmed — the header was still being drawn, or the
+    # vision model did not answer. One more look before giving up.
+    verdict = _viber_header_verdict(hwnd, names or [label], "")
+    if verdict == "unknown":
+        time.sleep(1.0)
+        verdict = _viber_header_verdict(hwnd, names or [label], "")
+    if verdict != "yes":
+        why = ("its header shows another name" if verdict == "no"
+               else "I could not read its header")
+        return False, (f"the Viber chat that opened may not be '{label}' ({why}), so nothing was "
+                       "typed. Use the name exactly as Viber shows it")
+    _viber_seen[key] = tuple(after)
+    try:
+        box.SetFocus()
+        time.sleep(0.2)
+    except Exception:
+        pass
+    return True, f"the Viber chat '{label}' is open (found by Viber's search, its header checked)"
+
+
+def viber_still_open(hwnd: int, label: str) -> bool:
+    """Is the chat confirmed by viber_open_by_name still the one on screen?"""
+    before, box = _viber_chat(hwnd)
+    key = "name:" + " ".join(label.casefold().split())
+    return box is not None and bool(before) and _viber_seen.get(key) == tuple(before)
+
+
 _HEADER_Q = """This is the top of a chat window in Viber. Is the chat header's name one
-of: {names} — or a short or affectionate form of one of them, or a phone number
-ending in {last4}? Answer JSON only: {{"verdict": "yes" | "no" | "unknown"}}.
-"unknown" when no name is readable."""
+of: {names} — or a short or affectionate form of one of them{phone}? Answer JSON
+only: {{"verdict": "yes" | "no" | "unknown"}}. "unknown" when no name is readable."""
 
 
 def _viber_header_says(hwnd: int, names: list[str], phone: str) -> bool:
     """One look at the chat header — only when the bubbles could not tell."""
+    return _viber_header_verdict(hwnd, names, phone) == "yes"
+
+
+def _viber_header_verdict(hwnd: int, names: list[str], phone: str) -> str:
+    """'yes' | 'no' | 'unknown' (no answer, nothing readable, or an error)."""
     try:
         import io
         import mss
@@ -315,14 +409,16 @@ def _viber_header_says(hwnd: int, names: list[str], phone: str) -> bool:
         img = Image.frombytes("RGB", g.size, g.rgb)
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=85)
+        digits = re.sub(r"\D", "", phone)
         reply = gemini.as_json(
             [gtypes.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
              _HEADER_Q.format(names=", ".join(f'"{n}"' for n in dict.fromkeys(names)),
-                              last4=re.sub(r"\D", "", phone)[-4:])],
+                              phone=f", or a phone number ending in {digits[-4:]}" if digits else "")],
             tier=gemini.VISION, timeout_ms=20_000, default=None)
-        return isinstance(reply, dict) and str(reply.get("verdict", "")).lower() == "yes"
+        v = str(reply.get("verdict", "")).lower() if isinstance(reply, dict) else ""
+        return v if v in ("yes", "no") else "unknown"
     except Exception:
-        return False
+        return "unknown"
 
 
 def viber_messages(hwnd: int) -> list[tuple[str, str]]:

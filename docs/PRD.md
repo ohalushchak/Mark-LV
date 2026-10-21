@@ -66,7 +66,7 @@ Status: ✅ built and tried live · 🟡 built, partly tried live · ⬜ planned
 | C-2 | `close_app` closes the named app, never the focused window, and reports admin rights or a save prompt instead of claiming success. Undo reopens it (ADR-008). | ✅ |
 | C-3 | Every state-changing tool ends its result with `[VERIFIED]`, `[UNVERIFIED]` or `[FAILED]`, based on a before/after check (ADR-013). | ✅ |
 | C-4 | Typing is exact under any keyboard layout (ADR-015). | ✅ |
-| C-5 | Messages are drafted in the messenger and left unsent. Sending happens only after "send this message" and a yes by voice or HUD (ADR-014). The person is found through the user's contacts (C-9) and must be the one whose chat opened (ADR-025). | ✅ Slack, Telegram, Viber; Discord, Teams, WhatsApp untried |
+| C-5 | Messages are drafted in the messenger and left unsent. Sending happens only after "send this message" and a yes by voice or HUD (ADR-014). The person is found through the user's contacts (C-9) and must be the one whose chat opened (ADR-025). | ✅ Slack, Telegram, Viber (by number, or shops and groups by name); Discord, Teams, WhatsApp untried |
 | C-6 | `computer_use` runs a multi-step task with re-locating before every click. It pauses before risky buttons, and moving the mouse stops it. | 🟡 the risky-step pause not yet seen live |
 | C-7 | Emptying the Recycle Bin is a dedicated action behind HUD CONFIRM (ADR-016). | 🟡 not yet seen live |
 | C-8 | `screen_process` with `monitor='all'`: one image per monitor in the same turn. | ⬜ |
@@ -121,7 +121,7 @@ Status: ✅ built and tried live · 🟡 built, partly tried live · ⬜ planned
 | Cost | No new subscription. The Gemini free tier plus the owner's existing Claude Code and Codex plans. No GPU required. |
 | Footprint | Optional features import nothing until enabled. The 1.24 GB embedding model is the one accepted heavy dependency, and it can be switched off. |
 | Platforms | Windows 11 is supported and tested live. macOS and Linux code paths branch on `platform.system()` and must keep working or explain themselves by voice. |
-| Quality | `python -m pytest tests` passes headless (550 passed, 1 skipped on 2026-10-21). Every feature is tried live by voice before merge (ADR-003). |
+| Quality | `python -m pytest tests` passes headless (552 passed, 1 skipped on 2026-10-21). Every feature is tried live by voice before merge (ADR-003). |
 
 ## 8. Success measures
 
