@@ -6,7 +6,8 @@ _Last updated: 2026-10-21_
 
 ## Current focus
 
-- Memory in a database with search by meaning, on `feature/semantic-memory` (stages 1–5 plus note editing; details in `progress.md` → *Done*, the design in `systemPatterns.md` → *Memory*). Tried live in five sessions on Windows:
+- Product requirements and architecture decisions written down from the sessions so far: `docs/PRD.md` (requirements with status) and `docs/ADR.md` (24 records), linked from `CLAUDE.md`. A new design decision gets a new ADR; a reversal supersedes the old record.
+- Memory in a database with search by meaning, merged into `main` (stages 1–5 plus note editing; details in `progress.md` → *Done*, the design in `systemPatterns.md` → *Memory*). Tried live in five sessions on Windows:
   - **Worked:** migration of the real `long_term.json` (5 facts, 3 summaries); facts saved in Ukrainian and recalled in either language ("children" found both sons); forget with undo; conversation recall; notes search, read and open; adding to the to-do list under a heading, removing an item, creating a note and undoing it.
   - **Fixed after live findings:** a short "my brother's name is …" saved as a suggestion because the transcript arrived after the tool call (3 s recheck); opening a project by description opened a file three folders deep (folder-note rule); a question ("what's in my notes about <project>?") backed a fact the model made from search results (questions excluded); "To Do List" vs "ToDo list"; tasks under the note's title landed in the last subsection; deleting a line left a blank line.
 
