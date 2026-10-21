@@ -12,7 +12,10 @@ WHY THIS EXISTS
 
     main.py reports:
         set_speaking(bool)   the assistant's voice started / stopped
-        note_user_input()    a real user turn: their transcript or a typed command
+        note_user_input(t)   a real user turn: their transcript or a typed command,
+                             with its words, which memory checks a saved fact
+                             against (did the user say this, or did the model
+                             infer it?)
 
     Text the application injects itself (tool results, announcements) is not
     user input and must never be reported as it — otherwise the assistant could
@@ -33,6 +36,11 @@ _speaking = False
 # Monotonic timestamps, newest last. Only recent ordering matters.
 _speech_ends: deque[float] = deque(maxlen=64)
 _user_inputs: deque[float] = deque(maxlen=64)
+# (monotonic time, text) of what the user said or typed. Transcription arrives
+# in word-sized pieces, so recent_user_text() glues pieces that came close
+# together back into utterances.
+_user_words: deque[tuple[float, str]] = deque(maxlen=400)
+_PIECE_GAP_S = 1.5
 
 
 def set_speaking(value: bool) -> None:
@@ -45,9 +53,28 @@ def set_speaking(value: bool) -> None:
         _speaking = bool(value)
 
 
-def note_user_input(at: float | None = None) -> None:
+def note_user_input(text: str = "", at: float | None = None) -> None:
+    when = time.monotonic() if at is None else at
     with _lock:
-        _user_inputs.append(time.monotonic() if at is None else at)
+        _user_inputs.append(when)
+        if text and text.strip():
+            _user_words.append((when, text.strip()))
+
+
+def recent_user_text(seconds: float = 900.0, limit: int = 12) -> list[str]:
+    """What the user said or typed in the last `seconds`, newest last, as up to
+    `limit` utterances."""
+    now = time.monotonic()
+    with _lock:
+        pieces = [(t, w) for t, w in _user_words if now - t <= seconds]
+    out: list[list] = []
+    for t, w in pieces:
+        if out and t - out[-1][0] <= _PIECE_GAP_S:
+            out[-1][0] = t
+            out[-1][1] += " " + w
+        else:
+            out.append([t, w])
+    return [w for _, w in out][-limit:]
 
 
 def is_speaking() -> bool:
@@ -83,3 +110,4 @@ def reset() -> None:
         _speaking = False
         _speech_ends.clear()
         _user_inputs.clear()
+        _user_words.clear()

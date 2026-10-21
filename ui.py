@@ -4290,7 +4290,12 @@ class MemoryOverlay(_HudOverlay):
     Memory used to be a 2200-character store that deleted its oldest entries
     when full and mentioned it only on stdout. The cap is gone; this panel is
     the other half of that change — a memory you cannot inspect is a memory you
-    cannot trust, and 'delete' has to be something the person can do."""
+    cannot trust, and 'delete' has to be something the person can do.
+
+    It also holds the two things the model may not decide alone: suggestions
+    (facts the model saved that the user's own words did not back, waiting at
+    the top with ✓ / ✕ — memory/trust.py), and the memory settings: search by
+    meaning on or off, and which notes vault the `notes` tool reads."""
 
     _OW = 520
 
@@ -4389,14 +4394,17 @@ class MemoryOverlay(_HudOverlay):
         self._lay.addWidget(sep)
 
         rows = all_entries_for_ui()
+        n_prop = sum(1 for r in rows if r.get("status") == "proposed")
 
-        cap = QLabel(f"{len(rows)} stored facts — newest first. "
-                     f"Nothing here is sent anywhere; it lives in "
-                     f"memory/long_term.json on this machine.")
+        cap = QLabel(f"{len(rows) - n_prop} stored facts — newest first"
+                     + (f", {n_prop} suggestion(s) to confirm on top" if n_prop else "")
+                     + ". It lives in memory/memory.db on this machine; a fact is "
+                       "sent to Gemini only inside the conversation.")
         cap.setWordWrap(True)
         cap.setFont(_font(7))
         cap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         self._lay.addWidget(cap)
+        self._add_settings_rows()
 
         if not rows:
             empty = QLabel("Nothing stored yet.")
@@ -4417,31 +4425,61 @@ class MemoryOverlay(_HudOverlay):
             ilay.setSpacing(3)
 
             for r in rows:
+                proposed = r.get("status") == "proposed"
                 line = QHBoxLayout(); line.setSpacing(6)
-                txt = QLabel(f"<b>{r['key'].replace('_', ' ')}</b> "
+                mark = (f"<span style='color:{C.ACC2}'>? </span>" if proposed else "")
+                txt = QLabel(f"{mark}<b>{r['key'].replace('_', ' ')}</b> "
                              f"<span style='color:{C.TEXT_MED}'>— {r['value']}</span>")
                 txt.setWordWrap(True)
                 txt.setFont(_font(8))
                 txt.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+                tip = {"user": "The user said this",
+                       "migrated": "Carried over from the old memory file",
+                       "observed": "Observed from how the user speaks",
+                       "model": "Saved by JARVIS; the user never said it"}.get(
+                           r.get("source", ""), "")
+                if r.get("evidence"):
+                    tip += f"\n“{r['evidence']}”"
+                if r.get("history"):
+                    tip += f"\nReplaced {r['history']} earlier value(s)"
+                txt.setToolTip(tip.strip())
                 line.addWidget(txt, 1)
 
-                meta = QLabel(f"{r['category'][:4]} · {r['updated'] or '—'}")
+                meta = QLabel(f"{r['category'][:4]} · {r['updated'] or '—'}"
+                              + (f" · ↺{r['history']}" if r.get("history") else ""))
                 meta.setFont(_font(7))
                 meta.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
                 line.addWidget(meta)
+
+                if proposed:
+                    ok = QPushButton("✓")
+                    ok.setFixedSize(20, 20)
+                    ok.setFont(_font(8, QFont.Weight.Bold))
+                    ok.setCursor(Qt.CursorShape.PointingHandCursor)
+                    ok.setToolTip("Yes, remember this")
+                    ok.setStyleSheet(f"""
+                        QPushButton {{ background: transparent; color: {C.TEXT_DIM};
+                            border: 1px solid {C.BORDER}; border-radius: 3px; }}
+                        QPushButton:hover {{ color: {C.GREEN}; border-color: {C.GREEN}; }}
+                    """)
+                    ok.clicked.connect(lambda _=False, i=r["id"]: self._decide(i, True))
+                    line.addWidget(ok)
 
                 rm = QPushButton("✕")
                 rm.setFixedSize(20, 20)
                 rm.setFont(_font(8, QFont.Weight.Bold))
                 rm.setCursor(Qt.CursorShape.PointingHandCursor)
-                rm.setToolTip("Forget this")
+                rm.setToolTip("Not true — drop it" if proposed else "Forget this")
                 rm.setStyleSheet(f"""
                     QPushButton {{ background: transparent; color: {C.TEXT_DIM};
                         border: 1px solid {C.BORDER}; border-radius: 3px; }}
                     QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; }}
                 """)
-                rm.clicked.connect(
-                    lambda _=False, c=r["category"], k=r["key"]: self._forget(c, k))
+                if proposed:
+                    rm.clicked.connect(lambda _=False, i=r["id"]: self._decide(i, False))
+                else:
+                    rm.clicked.connect(
+                        lambda _=False, c=r["category"], k=r["key"]: self._forget(c, k))
                 line.addWidget(rm)
 
                 holder = QWidget()
@@ -4477,6 +4515,133 @@ class MemoryOverlay(_HudOverlay):
         # The rebuild destroys the very ✕ button that emitted this signal, and
         # Qt is entitled to touch the sender after a slot returns; tearing it
         # down mid-emission is how a widget ends up half-alive on screen.
+        QTimer.singleShot(0, self._rebuild)
+
+    def _decide(self, fact_id: int, keep: bool):
+        from memory.memory_manager import accept, reject
+        (accept if keep else reject)(fact_id)
+        QTimer.singleShot(0, self._rebuild)
+
+    # ── Settings rows: search by meaning, notes vault ────────────────────────
+
+    def _small_btn(self, text: str, tip: str, slot) -> QPushButton:
+        b = QPushButton(text)
+        b.setFixedHeight(20)
+        b.setFont(_font(7))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setToolTip(tip)
+        b.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 0 8px; }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        b.clicked.connect(slot)
+        return b
+
+    def _settings_line(self, text: str, *buttons) -> None:
+        row = QHBoxLayout(); row.setSpacing(6)
+        lab = QLabel(text)
+        lab.setWordWrap(True)
+        lab.setFont(_font(7))
+        lab.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        row.addWidget(lab, 1)
+        for b in buttons:
+            row.addWidget(b)
+        holder = QWidget()
+        holder.setLayout(row)
+        self._lay.addWidget(holder)
+
+    def _add_settings_rows(self) -> None:
+        from memory import embedder, notes_index
+        from memory.config_manager import get_notes_vault, get_semantic_memory_enabled
+
+        on = get_semantic_memory_enabled()
+        emb = embedder.get()
+        if not on:
+            state = "off — words only"
+        elif emb is None:
+            state = ("unavailable — python -m pip install fastembed"
+                     if not embedder.available() else "starting…")
+        elif emb.ready():
+            state = f"ready ({emb.label})"
+        elif emb.error:
+            state = f"failed — {emb.error[:60]}"
+        else:
+            state = f"loading {emb.label}… (first run downloads 1.24 GB)"
+        self._settings_line(
+            f"Search by meaning: {state}",
+            self._small_btn("TURN OFF" if on else "TURN ON",
+                            "Find facts, conversations and notes by meaning in any "
+                            "language, with a local model (no network)",
+                            self._toggle_semantic))
+
+        try:
+            s = notes_index.status()
+        except Exception as e:
+            s = {"vault": "", "notes": 0, "chunks": 0, "embedded": 0, "error": str(e)}
+        chosen = get_notes_vault()
+        if s["vault"]:
+            where = Path(s["vault"]).name
+            how = "chosen" if chosen else "Obsidian's open vault"
+            detail = (f"Notes: {where} ({how}) — {s['notes']} notes"
+                      + (f", {s['embedded']}/{s['chunks']} passages by meaning"
+                         if s["chunks"] else ""))
+        else:
+            detail = "Notes: no vault — Obsidian has none open; choose a folder"
+        buttons = [self._small_btn("CHOOSE…", "The folder the notes tool searches",
+                                   self._choose_vault)]
+        if chosen:
+            buttons.append(self._small_btn("AUTO", "Use the vault Obsidian has open",
+                                           self._auto_vault))
+        self._settings_line(detail, *buttons)
+
+    def _toggle_semantic(self):
+        from memory import embedder
+        from memory.config_manager import (get_semantic_memory_enabled,
+                                           save_semantic_memory_enabled)
+        from memory.search import INDEXER
+        on = not get_semantic_memory_enabled()
+        save_semantic_memory_enabled(on)
+        if on:
+            if embedder.available():
+                if embedder.get() is None:
+                    embedder.use(embedder.Embedder())
+                embedder.get().start(on_ready=INDEXER.poke)
+                # The model takes ~20 s to load; refresh the status line when
+                # it is likely ready rather than leaving "loading…" up.
+                QTimer.singleShot(25_000, self._rebuild_if_open)
+        else:
+            embedder.use(None)
+        QTimer.singleShot(0, self._rebuild)
+
+    def _rebuild_if_open(self):
+        try:
+            if self.isVisible():
+                self._rebuild()
+        except RuntimeError:          # the panel was closed and destroyed meanwhile
+            pass
+
+    def _choose_vault(self):
+        from memory.config_manager import save_notes_vault
+        from memory import notes_index
+        from memory.search import INDEXER
+        start = notes_index.vault_path()
+        path = QFileDialog.getExistingDirectory(
+            self, "Notes vault", str(start) if start else str(Path.home()))
+        if not path:
+            return
+        save_notes_vault(path)
+        notes_index._last_scan = 0.0
+        INDEXER.poke()
+        QTimer.singleShot(0, self._rebuild)
+
+    def _auto_vault(self):
+        from memory.config_manager import save_notes_vault
+        from memory import notes_index
+        from memory.search import INDEXER
+        save_notes_vault("")
+        notes_index._last_scan = 0.0
+        INDEXER.poke()
         QTimer.singleShot(0, self._rebuild)
 
 

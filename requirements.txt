@@ -47,6 +47,15 @@ psutil>=5.9,<8
 send2trash                   # file_controller — recoverable deletes
 python-pptx                  # file_processor — presentation reading
 
+# ── Memory: search by meaning ─────────────────────────────────────────────────
+# Facts, past conversations and the Obsidian notes are found by meaning, in any
+# language, with a local embedding model (memory/embedder.py). fastembed runs it
+# on ONNX Runtime — CPU only, no torch, no GPU. The model itself (EmbeddingGemma,
+# 1.24 GB) downloads on first start into config/embed_models; memory search
+# turned off in the MEMORY panel never downloads it. Without the package,
+# memory still works on full-text search.
+fastembed>=0.9,<1
+
 # ── Remote dashboard (control from your phone) ────────────────────────────────
 fastapi>=0.110,<1
 uvicorn[standard]>=0.27,<1

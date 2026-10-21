@@ -9,6 +9,7 @@ Technologies, environment and constraints. Exact package versions live in `requi
 - PyQt6 for the HUD, avatar (QPainter, software-rendered) and video (`QGraphicsVideoItem` + `yt-dlp`).
 - `sounddevice` + `numpy` for audio I/O and all signal processing (echo guard, barge-in, visemes).
 - Playwright for browser automation.
+- `sqlite3` (stdlib; FTS5 is compiled into CPython's Windows build) and `fastembed` (ONNX Runtime, no torch) with `google/embeddinggemma-300m` for memory search. Without fastembed, or with search by meaning off, memory runs on full text only.
 - Optional, installed from inside the app: one wake-word engine — `openwakeword` (onnxruntime), `sherpa-onnx` + `sentencepiece` (bundles its own onnxruntime), or `vosk`; models go to `config/wake_models/` (openWakeWord keeps its own inside the package). Loading openwakeword and sherpa-onnx in one process was tested on Windows and works. FastAPI/uvicorn for the phone dashboard.
 
 ## Environment facts
@@ -38,8 +39,11 @@ Technologies, environment and constraints. Exact package versions live in `requi
   - Slack desktop: Ctrl+K toggles the jump box (a second Ctrl+K closes it); results are UIA ListItems ("social", "Jane Doe, Direct Message", "Search for: …"); the message box is an Edit named "Message to <name>" whose value keeps emoji as `:codes:`; the window title follows a switch about a second late.
   - Gemini vision on a 3440-px screen scaled to 1600 px: one look missed a 45-px taskbar button by ~38 px; a native-resolution crop corrects it. With thinking off the models answered from priors (a left-aligned taskbar) instead of looking.
 
+- Memory search measured on this machine (2026-10-21, CPU): EmbeddingGemma loads in ~2 s once cached (~20 s cold), a query embeds in ~20 ms, a vault passage in ~120 ms — the user's vault (83 notes, 1,712 chunks) took 207 s to embed the first time. Compared on 31 Ukrainian/English questions: EmbeddingGemma 29/31 top-1, e5-large 28/31 (scores bunch at 0.77–0.83, no usable threshold), Qwen3-0.6B-Q 27/31 at 720 ms a query, multilingual MiniLM 28/31. Short facts score low in absolute terms (right answer 0.23–0.44, unrelated ≤ 0.17), hence floors of 0.20 / 0.30 and the category prefix in the embedded text.
+- The user's Obsidian vault is found through `%APPDATA%\obsidian\obsidian.json`. Folder notes (`Project/Project.md`) are its convention; one project's source package nests copies of old documents three folders down.
+
 ## Constraints
 
-- No GPU, no OpenGL, no new heavy dependencies for core features.
+- No GPU, no OpenGL, no new heavy dependencies for core features. The memory model (1.24 GB download, CPU) is the user's chosen exception (2026-10-21: "беремо ту модель, яка буде кращою"); it is optional and can be switched off on the MEMORY panel.
 - Free-tier Gemini quotas run out: the text-model pool exhausts first, which is why the one-shot ladder leads with Live.
 - Live models refuse `response_modalities=["TEXT"]` (error 1007); one-shot Live calls read the reply from `output_transcription`.
